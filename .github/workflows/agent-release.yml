@@ -1,0 +1,82 @@
+name: Agent Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Agent version
+        required: true
+  push:
+    tags:
+      - "agent-v*"
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: bun-linux-x64
+            artifact: kubi-agent-linux-amd64
+          - target: bun-linux-arm64
+            artifact: kubi-agent-linux-arm64
+          - target: bun-darwin-x64
+            artifact: kubi-agent-darwin-amd64
+          - target: bun-darwin-arm64
+            artifact: kubi-agent-darwin-arm64
+          - target: bun-windows-x64
+            artifact: kubi-agent-windows-amd64.exe
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.9
+      - run: bun install --frozen-lockfile --ignore-scripts
+      - name: Build native agent
+        env:
+          KUBI_AGENT_VERSION: ${{ inputs.version || github.ref_name }}
+          KUBI_AGENT_BUILD_ID: ${{ github.sha }}
+        run: |
+          VERSION="${KUBI_AGENT_VERSION#agent-v}"
+          bun build agent/src/cli.js --compile --target=${{ matrix.target }} \
+            --define process.env.KUBI_AGENT_VERSION="\"${VERSION}\"" \
+            --define process.env.KUBI_AGENT_BUILD_ID="\"${KUBI_AGENT_BUILD_ID}\"" \
+            --outfile=dist/${{ matrix.artifact }}
+      - name: Write checksum
+        run: sha256sum dist/${{ matrix.artifact }} > dist/${{ matrix.artifact }}.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            dist/${{ matrix.artifact }}
+            dist/${{ matrix.artifact }}.sha256
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/agent-v')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: sigstore/cosign-installer@v3
+      - name: Add installer scripts and checksum manifest
+        run: |
+          cp agent/install/install.sh dist/install.sh
+          cp agent/install/install.ps1 dist/install.ps1
+          chmod +x dist/install.sh
+          (cd dist && sha256sum kubi-agent-* install.sh install.ps1 > SHA256SUMS)
+      - name: Sign release artifacts
+        run: |
+          for file in dist/kubi-agent-* dist/install.sh dist/install.ps1 dist/SHA256SUMS; do
+            cosign sign-blob --yes "$file" --output-signature "$file.sig" --output-certificate "$file.pem"
+          done
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*

@@ -1,0 +1,17 @@
+{
+  "name": "kubi-agents",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "agent": "node agent/src/cli.js",
+    "build": "bun build agent/src/cli.js --compile --outfile dist/kubi-agent",
+    "build:linux-amd64": "bun build agent/src/cli.js --compile --target=bun-linux-x64 --outfile dist/kubi-agent-linux-amd64",
+    "check": "node --check agent/src/cli.js && node --check agent/src/config.js && node --check agent/src/control-plane.js && node --check agent/src/kube.js && node --check agent/src/server.js && node --check agent/src/alerting.js",
+    "test": "bun test tests/*.test.js"
+  },
+  "dependencies": {
+    "@kubernetes/client-node": "^1.4.0",
+    "yaml": "^2.8.2"
+  },
+  "devDependencies": {}
+}
