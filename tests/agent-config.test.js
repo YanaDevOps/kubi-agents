@@ -43,6 +43,25 @@ discovery:
     });
   }));
 
+  test('uses the running binary release instead of stale pairing metadata', () => {
+    const runtime = resolveAgentRuntimeConfig(
+      {
+        controlPlaneUrl: 'https://app.kubi.live',
+        agentId: 'agent-1',
+        agentSecret: 'secret-1',
+        version: '0.1.0-dev',
+        buildId: 'stale-pairing-build'
+      },
+      {
+        version: '0.1.6',
+        buildId: 'release-build-016'
+      }
+    );
+
+    expect(runtime.version).toBe('0.1.6');
+    expect(runtime.buildId).toBe('release-build-016');
+  });
+
   test('redacts credentials from optional rotating file logs', () => withTemporaryDirectory((directory) => {
     const logPath = path.join(directory, 'agent.log');
     const logger = createAgentLogger({ outputs: [], file: { path: logPath, max_size_mb: 1, max_files: 2 } });

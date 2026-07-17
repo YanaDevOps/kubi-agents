@@ -21,6 +21,10 @@ const DEFAULT_CAPABILITIES = {
   runtimeApiVersion: LOCAL_AGENT_RUNTIME_API_VERSION,
   buildId: AGENT_BUILD_ID
 };
+const RUNNING_RELEASE = {
+  version: AGENT_VERSION,
+  buildId: AGENT_BUILD_ID
+};
 
 function parseArgs(argv) {
   const args = {};
@@ -79,7 +83,7 @@ async function pairAgent(argv) {
 
 async function runAgent() {
   const config = loadAgentConfig();
-  const runtimeConfig = resolveAgentRuntimeConfig(config);
+  const runtimeConfig = resolveAgentRuntimeConfig(config, RUNNING_RELEASE);
   const logger = createAgentLogger(runtimeConfig.logging);
   const discoveryState = {
     candidateCount: 0,
@@ -174,7 +178,7 @@ async function runAgent() {
 
 async function rotateAgent() {
   const config = loadAgentConfig();
-  const runtimeConfig = resolveAgentRuntimeConfig(config);
+  const runtimeConfig = resolveAgentRuntimeConfig(config, RUNNING_RELEASE);
   const rotation = await rotateAgentCredentials({
     controlPlaneUrl: runtimeConfig.controlPlaneUrl,
     agentId: runtimeConfig.agentId,
@@ -204,7 +208,7 @@ function configCommand(action) {
   }
   if (action === 'show') {
     const identity = loadAgentConfig();
-    const effective = resolveAgentRuntimeConfig(identity);
+    const effective = resolveAgentRuntimeConfig(identity, RUNNING_RELEASE);
     console.log(JSON.stringify({ ...effective, agentSecret: '[redacted]' }, null, 2));
     return;
   }

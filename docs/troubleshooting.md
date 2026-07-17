@@ -32,6 +32,8 @@ If KUBI reports an ambiguous context, cluster, or user name, inspect configured 
 
 The agent keeps heartbeat and runtime relay connectivity separate. Agent `v0.1.5` and newer actively probes the WebSocket and reconnects automatically after a SaaS rollout or transient network failure. A short `relay disconnected; reconnecting` message is expected during recovery; no manual service restart should be required.
 
+Agent `v0.1.6` and newer use the installed binary release for both heartbeat and runtime health. Upgrading the binary does not require deleting the saved identity or pairing the agent again.
+
 ## Update Required
 
 The installed binary is below the minimum hosted version or reports development build metadata. Download the current binary from the latest GitHub Release, replace it, verify `kubi-agent version`, and restart the service.

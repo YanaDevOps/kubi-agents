@@ -81,7 +81,7 @@ export function saveAgentConfig(config) {
   return configPath;
 }
 
-export function resolveAgentRuntimeConfig(config) {
+export function resolveAgentRuntimeConfig(config, runningRelease = {}) {
   const settings = loadAgentSettings();
   const validated = validateAgentSettings(settings);
   const relay = settings.relay && typeof settings.relay === 'object' ? settings.relay : {};
@@ -90,8 +90,8 @@ export function resolveAgentRuntimeConfig(config) {
     controlPlaneUrl: process.env.KUBI_AGENT_CONTROL_PLANE_URL || relay.url || config.controlPlaneUrl,
     agentId: config.agentId,
     agentSecret: config.agentSecret,
-    version: process.env.KUBI_AGENT_VERSION || config.version || null,
-    buildId: process.env.KUBI_AGENT_BUILD_ID || config.buildId || null,
+    version: runningRelease.version || process.env.KUBI_AGENT_VERSION || config.version || null,
+    buildId: runningRelease.buildId || process.env.KUBI_AGENT_BUILD_ID || config.buildId || null,
     runtimeApiVersion: LOCAL_AGENT_RUNTIME_API_VERSION,
     kubeconfigPath: process.env.KUBI_AGENT_KUBECONFIG || config.kubeconfigPath || null,
     kubeconfigPaths: validated.kubeconfigPaths,
