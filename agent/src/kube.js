@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
+import nodeFetch from 'node-fetch';
 import { parse as parseYaml } from 'yaml';
 import { detectProviderMetadata } from '../../src/shared/provider-detection.js';
 import { deriveRuntimeTargetKey } from '../../src/shared/runtime-target.js';
@@ -85,7 +86,7 @@ function baseServerUrl(kubeConfig) {
   return new URL(cluster.server);
 }
 
-async function fetchKubeJson(kubeConfig, pathWithQuery) {
+export async function fetchKubeJson(kubeConfig, pathWithQuery) {
   const url = new URL(pathWithQuery, baseServerUrl(kubeConfig));
   const requestOptions = await kubeConfig.applyToFetchOptions({
     method: 'GET',
@@ -94,7 +95,7 @@ async function fetchKubeJson(kubeConfig, pathWithQuery) {
     }
   });
 
-  const response = await fetch(url, requestOptions);
+  const response = await nodeFetch(url, requestOptions);
   if (!response.ok) {
     throw new Error(`Kubernetes API responded with HTTP ${response.status}.`);
   }
@@ -110,7 +111,7 @@ async function fetchKubeText(kubeConfig, pathWithQuery) {
     }
   });
 
-  const response = await fetch(url, requestOptions);
+  const response = await nodeFetch(url, requestOptions);
   if (!response.ok) {
     throw new Error(`Kubernetes API responded with HTTP ${response.status}.`);
   }

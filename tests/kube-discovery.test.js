@@ -1,8 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 import fs from 'node:fs';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
-import { discoverLocalAccessCandidates, resolveAgentRuntimeConfigForSelector } from '../agent/src/kube.js';
+import { discoverLocalAccessCandidates, fetchKubeJson, resolveAgentRuntimeConfigForSelector } from '../agent/src/kube.js';
 
 const kubeconfig = (server = 'https://shared.invalid') => `apiVersion: v1
 kind: Config
@@ -23,6 +24,30 @@ current-context: shared-context
 `;
 
 describe('kubeconfig source merge', () => {
+  test('uses kubeconfig-aware Node transport instead of global fetch', async () => {
+    const server = http.createServer((_request, response) => {
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ gitVersion: 'v1.test' }));
+    });
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('Test server did not start.');
+    const previousFetch = globalThis.fetch;
+    globalThis.fetch = () => {
+      throw new Error('global fetch must not handle agent Kubernetes requests');
+    };
+
+    try {
+      expect(await fetchKubeJson({
+        getCurrentCluster: () => ({ server: `http://127.0.0.1:${address.port}` }),
+        applyToFetchOptions: async (options) => options
+      }, '/version')).toEqual({ gitVersion: 'v1.test' });
+    } finally {
+      globalThis.fetch = previousFetch;
+      await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+
   test('deduplicates identical records while blocking conflicting records', () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'kubi-agent-merge-'));
     const firstPath = path.join(tempDir, 'first.yaml');
