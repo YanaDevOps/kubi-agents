@@ -4,6 +4,8 @@ KUBI Agent is the customer-side runtime for [KUBI SaaS](https://kubi.live). Run 
 
 Raw kubeconfigs, client certificates, exec credentials, and bearer tokens remain on the agent host.
 
+Agent `v0.1.5` and newer monitor the hosted WebSocket with ping/pong probes and reconnect automatically when a SaaS rollout or network interruption leaves the previous relay connection stale.
+
 ## Install
 
 1. Sign in at [app.kubi.live](https://app.kubi.live).

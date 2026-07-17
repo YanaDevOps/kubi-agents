@@ -19,17 +19,51 @@ function requestStream(input) {
 export function createAgentRelayClient(options) {
   let socket = null;
   let reconnectTimer = null;
+  let readyTimer = null;
+  let livenessTimer = null;
   let closed = false;
-  let backoffMs = 1_000;
+  let awaitingPong = false;
+  const reconnectBaseDelayMs = Number(options.reconnectBaseDelayMs ?? 1_000);
+  const reconnectMaxDelayMs = Number(options.reconnectMaxDelayMs ?? 30_000);
+  const reconnectJitterMs = Number(options.reconnectJitterMs ?? 1_000);
+  const readyTimeoutMs = Number(options.readyTimeoutMs ?? 15_000);
+  const livenessIntervalMs = Number(options.livenessIntervalMs ?? 15_000);
+  let backoffMs = reconnectBaseDelayMs;
+
+  const clearSocketTimers = () => {
+    if (readyTimer) clearTimeout(readyTimer);
+    if (livenessTimer) clearInterval(livenessTimer);
+    readyTimer = null;
+    livenessTimer = null;
+    awaitingPong = false;
+  };
 
   const scheduleReconnect = () => {
     if (closed || reconnectTimer) return;
-    const jitter = Math.floor(Math.random() * Math.min(1_000, backoffMs / 2));
+    const jitter = reconnectJitterMs > 0
+      ? Math.floor(Math.random() * Math.min(reconnectJitterMs, backoffMs / 2))
+      : 0;
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null;
       connect();
     }, backoffMs + jitter);
-    backoffMs = Math.min(30_000, backoffMs * 2);
+    backoffMs = Math.min(reconnectMaxDelayMs, Math.max(reconnectBaseDelayMs, backoffMs * 2));
+  };
+
+  const startLivenessWatchdog = (activeSocket) => {
+    if (livenessTimer) clearInterval(livenessTimer);
+    awaitingPong = false;
+    livenessTimer = setInterval(() => {
+      if (closed || socket !== activeSocket || activeSocket.readyState !== WebSocket.OPEN) return;
+      if (awaitingPong) {
+        options.onError?.(new Error('Hosted relay connection became stale; reconnecting.'));
+        if (typeof activeSocket.terminate === 'function') activeSocket.terminate();
+        else activeSocket.close();
+        return;
+      }
+      awaitingPong = true;
+      if (typeof activeSocket.ping === 'function') activeSocket.ping();
+    }, livenessIntervalMs);
   };
 
   const respond = (requestId, result, error) => {
@@ -60,10 +94,17 @@ export function createAgentRelayClient(options) {
 
   const connect = () => {
     if (closed) return;
-    socket = options.webSocketFactory?.(relayUrl(options.runtimeConfig.controlPlaneUrl)) ??
+    const activeSocket = options.webSocketFactory?.(relayUrl(options.runtimeConfig.controlPlaneUrl)) ??
       new WebSocket(relayUrl(options.runtimeConfig.controlPlaneUrl), { handshakeTimeout: 10_000, maxPayload: 1024 * 1024 });
-    socket.on('open', () => {
-      socket.send(JSON.stringify({
+    socket = activeSocket;
+    activeSocket.on('open', () => {
+      readyTimer = setTimeout(() => {
+        if (socket !== activeSocket || closed) return;
+        options.onError?.(new Error('Hosted relay authentication timed out; reconnecting.'));
+        if (typeof activeSocket.terminate === 'function') activeSocket.terminate();
+        else activeSocket.close();
+      }, readyTimeoutMs);
+      activeSocket.send(JSON.stringify({
         type: 'hello',
         agentId: options.runtimeConfig.agentId,
         agentSecret: options.runtimeConfig.agentSecret,
@@ -72,7 +113,7 @@ export function createAgentRelayClient(options) {
         capabilities: options.capabilities
       }));
     });
-    socket.on('message', async (raw) => {
+    activeSocket.on('message', async (raw) => {
       let message;
       try {
         message = JSON.parse(raw.toString());
@@ -80,7 +121,10 @@ export function createAgentRelayClient(options) {
         return;
       }
       if (message.type === 'ready') {
-        backoffMs = 1_000;
+        if (readyTimer) clearTimeout(readyTimer);
+        readyTimer = null;
+        backoffMs = reconnectBaseDelayMs;
+        startLivenessWatchdog(activeSocket);
         options.onStatus?.('connected');
         return;
       }
@@ -91,11 +135,17 @@ export function createAgentRelayClient(options) {
         respond(message.requestId, undefined, error instanceof Error ? error.message : 'Agent relay command failed.');
       }
     });
-    socket.on('close', () => {
+    activeSocket.on('pong', () => {
+      if (socket === activeSocket) awaitingPong = false;
+    });
+    activeSocket.on('close', () => {
+      if (socket !== activeSocket) return;
+      clearSocketTimers();
+      socket = null;
       options.onStatus?.('disconnected');
       scheduleReconnect();
     });
-    socket.on('error', (error) => {
+    activeSocket.on('error', (error) => {
       options.onError?.(error instanceof Error ? error : new Error('Agent relay connection failed.'));
     });
   };
@@ -108,7 +158,10 @@ export function createAgentRelayClient(options) {
       closed = true;
       if (reconnectTimer) clearTimeout(reconnectTimer);
       reconnectTimer = null;
-      socket?.close();
+      clearSocketTimers();
+      const activeSocket = socket;
+      socket = null;
+      activeSocket?.close();
     }
   };
 }
