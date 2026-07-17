@@ -1,8 +1,9 @@
 import { describe, expect, test } from 'bun:test';
 import fs from 'node:fs';
-import http from 'node:http';
+import https from 'node:https';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { discoverLocalAccessCandidates, fetchKubeJson, resolveAgentRuntimeConfigForSelector } from '../agent/src/kube.js';
 
 const kubeconfig = (server = 'https://shared.invalid') => `apiVersion: v1
@@ -25,7 +26,10 @@ current-context: shared-context
 
 describe('kubeconfig source merge', () => {
   test('uses kubeconfig-aware Node transport instead of global fetch', async () => {
-    const server = http.createServer((_request, response) => {
+    const certificate = fs.readFileSync(fileURLToPath(new URL('./fixtures/tls/localhost-cert.pem', import.meta.url)), 'utf8');
+    const privateKey = fs.readFileSync(fileURLToPath(new URL('./fixtures/tls/localhost-key.pem', import.meta.url)), 'utf8');
+    const agent = new https.Agent({ ca: certificate });
+    const server = https.createServer({ cert: certificate, key: privateKey }, (_request, response) => {
       response.writeHead(200, { 'content-type': 'application/json' });
       response.end(JSON.stringify({ gitVersion: 'v1.test' }));
     });
@@ -39,10 +43,11 @@ describe('kubeconfig source merge', () => {
 
     try {
       expect(await fetchKubeJson({
-        getCurrentCluster: () => ({ server: `http://127.0.0.1:${address.port}` }),
-        applyToFetchOptions: async (options) => options
+        getCurrentCluster: () => ({ server: `https://127.0.0.1:${address.port}` }),
+        applyToFetchOptions: async (options) => ({ ...options, agent })
       }, '/version')).toEqual({ gitVersion: 'v1.test' });
     } finally {
+      agent.destroy();
       globalThis.fetch = previousFetch;
       await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     }

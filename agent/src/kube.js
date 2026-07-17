@@ -1,10 +1,11 @@
 import { KubeConfig } from '@kubernetes/client-node';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
+import http from 'node:http';
+import https from 'node:https';
 import os from 'node:os';
 import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
-import nodeFetch from 'node-fetch';
 import { parse as parseYaml } from 'yaml';
 import { detectProviderMetadata } from '../../src/shared/provider-detection.js';
 import { deriveRuntimeTargetKey } from '../../src/shared/runtime-target.js';
@@ -86,6 +87,38 @@ function baseServerUrl(kubeConfig) {
   return new URL(cluster.server);
 }
 
+function nodeHeaders(headers) {
+  if (!headers) return undefined;
+  if (typeof headers.entries === 'function') {
+    return Object.fromEntries(headers.entries());
+  }
+  return headers;
+}
+
+function requestKubeApi(url, requestOptions) {
+  const transport = url.protocol === 'https:' ? https : url.protocol === 'http:' ? http : null;
+  if (!transport) {
+    throw new Error(`Unsupported Kubernetes API protocol: ${url.protocol}`);
+  }
+
+  return new Promise((resolve, reject) => {
+    const request = transport.request(url, {
+      ...requestOptions,
+      headers: nodeHeaders(requestOptions.headers)
+    }, (response) => {
+      const chunks = [];
+      response.on('data', (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+      response.on('end', () => resolve({
+        status: response.statusCode ?? 0,
+        body: Buffer.concat(chunks).toString('utf8')
+      }));
+    });
+    request.on('timeout', () => request.destroy(new Error('Kubernetes API request timed out.')));
+    request.on('error', reject);
+    request.end();
+  });
+}
+
 export async function fetchKubeJson(kubeConfig, pathWithQuery) {
   const url = new URL(pathWithQuery, baseServerUrl(kubeConfig));
   const requestOptions = await kubeConfig.applyToFetchOptions({
@@ -95,11 +128,15 @@ export async function fetchKubeJson(kubeConfig, pathWithQuery) {
     }
   });
 
-  const response = await nodeFetch(url, requestOptions);
-  if (!response.ok) {
+  const response = await requestKubeApi(url, requestOptions);
+  if (response.status < 200 || response.status >= 300) {
     throw new Error(`Kubernetes API responded with HTTP ${response.status}.`);
   }
-  return response.json().catch(() => ({}));
+  try {
+    return JSON.parse(response.body);
+  } catch {
+    return {};
+  }
 }
 
 async function fetchKubeText(kubeConfig, pathWithQuery) {
@@ -111,11 +148,11 @@ async function fetchKubeText(kubeConfig, pathWithQuery) {
     }
   });
 
-  const response = await nodeFetch(url, requestOptions);
-  if (!response.ok) {
+  const response = await requestKubeApi(url, requestOptions);
+  if (response.status < 200 || response.status >= 300) {
     throw new Error(`Kubernetes API responded with HTTP ${response.status}.`);
   }
-  return response.text();
+  return response.body;
 }
 
 export async function fetchKubeList(kubeConfig, path, allowMissing = false) {
