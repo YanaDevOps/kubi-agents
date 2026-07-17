@@ -27,6 +27,8 @@ logging:
 
 `kubeconfig_paths` accepts files from a cluster node or gateway host. Every API endpoint referenced by those files must already be reachable from that host. `kubeconfig_directories` scans `.yaml`, `.yml`, and `.conf` files.
 
+Discovery also reads `KUBECONFIG` and the standard `~/.kube/config`. Structurally identical context, cluster, and user records found in more than one file are treated as one context. Conflicting records with the same names are blocked until they are removed or renamed and the agent is rescanned.
+
 The pairing identity remains separate in `${XDG_CONFIG_HOME:-~/.config}/kubi-agent/config.json` or `%APPDATA%\kubi-agent\config.json`. It has mode `0600` and must be treated as a secret.
 
 Environment variables override YAML: `KUBI_AGENT_CONFIG`, `KUBI_AGENT_CONTROL_PLANE_URL`, `KUBI_AGENT_KUBECONFIG`, `KUBECONFIG`, `KUBI_AGENT_CONTEXT`, `KUBI_AGENT_NAMESPACE`, `KUBI_AGENT_ALERTING_CONFIG`, and `KUBI_AGENT_ALERTING_HISTORY`.

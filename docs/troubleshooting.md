@@ -26,6 +26,8 @@ Rescan is delivered through the hosted relay. Check relay connectivity first, th
 
 KUBI runs a Kubernetes API probe before marking a context connected. Verify the same context using `kubectl --kubeconfig <path> --context <name> get namespaces` on the agent host. Check DNS, routing, TLS files, exec-plugin environment, and Kubernetes RBAC.
 
+If KUBI reports an ambiguous context, cluster, or user name, inspect configured paths, `KUBECONFIG`, and `~/.kube/config`. Identical copies are merged automatically; entries with the same name but different endpoints or credentials must be removed or renamed before rescanning.
+
 ## Update Required
 
 The installed binary is below the minimum hosted version or reports development build metadata. Download the current binary from the latest GitHub Release, replace it, verify `kubi-agent version`, and restart the service.

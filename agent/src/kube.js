@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import { parse as parseYaml } from 'yaml';
 import { detectProviderMetadata } from '../../src/shared/provider-detection.js';
 import { deriveRuntimeTargetKey } from '../../src/shared/runtime-target.js';
@@ -819,11 +820,12 @@ function mergeDiscoveredKubeconfigSources(runtimeConfig) {
     for (const clusterEntry of parsed.document.clusters) {
       const name = stringOrUndefined(clusterEntry?.name);
       if (!name) continue;
-      if (clustersByName.has(name)) {
-        duplicateClusterNames.add(name);
+      const cluster = normalizeClusterFileReferences(asRecord(clusterEntry.cluster) || {}, source.path);
+      const existingCluster = clustersByName.get(name);
+      if (existingCluster) {
+        if (!isDeepStrictEqual(existingCluster.cluster, cluster)) duplicateClusterNames.add(name);
         continue;
       }
-      const cluster = normalizeClusterFileReferences(asRecord(clusterEntry.cluster) || {}, source.path);
       clustersByName.set(name, {
         name,
         cluster,
@@ -834,11 +836,12 @@ function mergeDiscoveredKubeconfigSources(runtimeConfig) {
     for (const userEntry of parsed.document.users) {
       const name = stringOrUndefined(userEntry?.name);
       if (!name) continue;
-      if (usersByName.has(name)) {
-        duplicateUserNames.add(name);
+      const user = normalizeUserFileReferences(asRecord(userEntry.user) || {}, source.path);
+      const existingUser = usersByName.get(name);
+      if (existingUser) {
+        if (!isDeepStrictEqual(existingUser.user, user)) duplicateUserNames.add(name);
         continue;
       }
-      const user = normalizeUserFileReferences(asRecord(userEntry.user) || {}, source.path);
       usersByName.set(name, {
         name,
         user,
@@ -849,13 +852,15 @@ function mergeDiscoveredKubeconfigSources(runtimeConfig) {
     for (const contextEntry of parsed.document.contexts) {
       const name = stringOrUndefined(contextEntry?.name);
       if (!name) continue;
-      if (contextsByName.has(name)) {
-        duplicateContextNames.add(name);
+      const context = asRecord(contextEntry.context) || {};
+      const existingContext = contextsByName.get(name);
+      if (existingContext) {
+        if (!isDeepStrictEqual(existingContext.context, context)) duplicateContextNames.add(name);
         continue;
       }
       contextsByName.set(name, {
         name,
-        context: asRecord(contextEntry.context) || {},
+        context,
         sourceFileLabel: source.label
       });
     }
@@ -863,6 +868,16 @@ function mergeDiscoveredKubeconfigSources(runtimeConfig) {
     if (parsed.document.currentContext) {
       currentContextName = parsed.document.currentContext;
     }
+  }
+
+  if (duplicateContextNames.size > 0) {
+    warnings.push(`Conflicting context names across kubeconfig sources: ${Array.from(duplicateContextNames).sort().join(', ')}.`);
+  }
+  if (duplicateClusterNames.size > 0) {
+    warnings.push(`Conflicting cluster names across kubeconfig sources: ${Array.from(duplicateClusterNames).sort().join(', ')}.`);
+  }
+  if (duplicateUserNames.size > 0) {
+    warnings.push(`Conflicting user names across kubeconfig sources: ${Array.from(duplicateUserNames).sort().join(', ')}.`);
   }
 
   return {
@@ -969,6 +984,10 @@ function buildDiscoveredAccessCandidates(merged) {
     const insecureSkipTlsVerify = clusterRecord.skipTLSVerify === true || clusterRecord['insecure-skip-tls-verify'] === true;
     const hasToken = typeof userRecord.token === 'string' && userRecord.token.trim().length > 0;
     const support = classifyDirectSupport(clusterRecord.server, authKind, hasCustomCa, insecureSkipTlsVerify, hasToken);
+    const hasAmbiguousSource =
+      merged.duplicateContextNames.has(contextEntry.name) ||
+      merged.duplicateClusterNames.has(context.cluster) ||
+      merged.duplicateUserNames.has(context.user);
     const execRecord = asRecord(userRecord.exec);
     const provider = detectProviderMetadata({
       contextName: contextEntry.name || undefined,
@@ -996,9 +1015,9 @@ function buildDiscoveredAccessCandidates(merged) {
       providerDetectionConfidence: provider.confidence,
       providerEvidence: provider.evidence,
       providerHints: provider.hints,
-      recommendedMode: support.state === 'invalid' ? 'none' : 'agent',
-      directSupportState: support.state,
-      directSupportReason: support.reason,
+      recommendedMode: hasAmbiguousSource || support.state === 'invalid' ? 'none' : 'agent',
+      directSupportState: hasAmbiguousSource ? 'invalid' : support.state,
+      directSupportReason: hasAmbiguousSource ? 'ambiguous_source' : support.reason,
       endpointMasked: maskEndpoint(clusterRecord.server || ''),
       clusterFingerprint: discoveredClusterFingerprint(contextEntry, clusterRecord)
     };
