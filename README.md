@@ -1,14 +1,22 @@
-# KUBI Agents
+# KUBI Agent
 
-Customer-side agents for KUBI SaaS.
+KUBI Agent is the customer-side runtime for [KUBI SaaS](https://kubi.live). Run it on a Kubernetes node or a gateway host that can already reach one or more Kubernetes APIs. The agent discovers local kubeconfigs and opens an outbound WSS connection to KUBI over port 443; no inbound port, browser-to-host tunnel, or public Kubernetes API is required.
 
-The KUBI Agent runs on infrastructure that can reach your Kubernetes API. It pairs with your KUBI workspace, discovers local kubeconfig contexts, and exposes a loopback read-only runtime at `http://127.0.0.1:47641/v1` for the hosted KUBI app.
+Raw kubeconfigs, client certificates, exec credentials, and bearer tokens remain on the agent host.
 
-## What You Download
+## Install
 
-GitHub Releases publish native binaries and installer scripts:
+1. Sign in at [app.kubi.live](https://app.kubi.live).
+2. Open **KUBI APP → Connections → Agent**.
+3. Select the host platform and create a one-time pairing token.
+4. Run the generated installation command on the gateway host or cluster node.
+5. Add custom kubeconfig paths to `/etc/kubi-agent/agent.yaml`, restart the service, and select a discovered context in **Connections → Kubeconfigs**.
 
-| Target | Artifact |
+The pairing token expires after 30 minutes and can be used once. If it expires, create a new token; an expired token does not affect an already paired agent.
+
+## Supported Artifacts
+
+| Platform | Artifact |
 | --- | --- |
 | Linux x64 | `kubi-agent-linux-amd64` |
 | Linux ARM64 | `kubi-agent-linux-arm64` |
@@ -16,66 +24,24 @@ GitHub Releases publish native binaries and installer scripts:
 | macOS Apple Silicon | `kubi-agent-darwin-arm64` |
 | Windows x64 | `kubi-agent-windows-amd64.exe` |
 
-Each release also includes:
-
-- `install.sh` for Linux/macOS
-- `install.ps1` for Windows
-- `<artifact>.sha256` checksums
-- `<artifact>.sig` cosign signatures
-- `<artifact>.pem` signing certificates
-- `SHA256SUMS`
-
-## Quick Start
-
-1. Open `https://app.kubi.live/profile?section=connect&connect=agent`.
-2. Select where you will run the agent.
-3. Generate a one-time pairing token.
-4. Run the install command shown by KUBI.
-
-Linux/macOS command shape:
-
-```sh
-curl -fsSL "https://github.com/YanaDevOps/kubi-agents/releases/download/agent-v0.1.0/install.sh" -o kubi-agent-install.sh
-sh kubi-agent-install.sh \
-  --target linux-amd64 \
-  --download-base-url "https://github.com/YanaDevOps/kubi-agents/releases/download/agent-v0.1.0" \
-  --control-plane-url "https://app.kubi.live" \
-  --pairing-token "<one-time-token>"
-```
-
-Windows command shape:
-
-```powershell
-Invoke-WebRequest -Uri "https://github.com/YanaDevOps/kubi-agents/releases/download/agent-v0.1.0/install.ps1" -OutFile "kubi-agent-install.ps1"
-PowerShell -ExecutionPolicy Bypass -File .\kubi-agent-install.ps1 `
-  -Target "windows-amd64" `
-  -DownloadBaseUrl "https://github.com/YanaDevOps/kubi-agents/releases/download/agent-v0.1.0" `
-  -ControlPlaneUrl "https://app.kubi.live" `
-  -PairingToken "<one-time-token>"
-```
+Every release includes SHA-256 checksums, cosign signatures/certificates, `install.sh`, `install.ps1`, and `SHA256SUMS`.
 
 ## CLI
 
 ```sh
-kubi-agent pair --control-plane-url <url> --pairing-token <token> [--display-name <name>]
+kubi-agent pair --control-plane-url https://app.kubi.live --pairing-token <token>
 kubi-agent run
+kubi-agent version
+kubi-agent config validate
+kubi-agent config show --effective
 kubi-agent rotate
 ```
 
 ## Documentation
 
-- [Installation](docs/installation.md)
-- [Configuration](docs/configuration.md)
+- [Installation and flags](docs/installation.md)
+- [Configuration and gateway kubeconfigs](docs/configuration.md)
 - [Security model](docs/security.md)
 - [Troubleshooting](docs/troubleshooting.md)
 
-## Development
-
-```sh
-bun install
-bun run check
-bun test
-bun run build
-```
-
-Release tags use the `agent-vX.Y.Z` format.
+Release tags use `agent-vX.Y.Z`.

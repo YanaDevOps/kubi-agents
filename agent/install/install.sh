@@ -63,12 +63,40 @@ chmod +x "$TMP_DIR/kubi-agent"
 if [ "$(id -u)" -eq 0 ]; then
   mkdir -p "$INSTALL_DIR"
   cp "$TMP_DIR/kubi-agent" "$INSTALL_DIR/kubi-agent"
+  mkdir -p /etc/kubi-agent /var/log/kubi-agent
+  chmod 0750 /etc/kubi-agent /var/log/kubi-agent
+  if [ ! -f /etc/kubi-agent/agent.yaml ]; then
+    cat >/etc/kubi-agent/agent.yaml <<EOF
+# KUBI Agent settings. Restart kubi-agent after editing this file.
+relay:
+  url: $CONTROL_PLANE_URL
+
+discovery:
+  # Add every kubeconfig the gateway host should expose to this workspace.
+  kubeconfig_paths:
+    - /root/.kube/config
+  # kubeconfig_directories:
+  #   - /home/operator/.kube
+  # context: production
+  # namespace: default
+
+logging:
+  level: info
+  outputs:
+    - stdout
+  # file:
+  #   path: /var/log/kubi-agent/agent.log
+  #   max_size_mb: 10
+  #   max_files: 5
+EOF
+    chmod 0640 /etc/kubi-agent/agent.yaml
+  fi
   "$INSTALL_DIR/kubi-agent" pair --control-plane-url "$CONTROL_PLANE_URL" --pairing-token "$PAIRING_TOKEN"
 
   if command -v systemctl >/dev/null 2>&1 && [ "$TARGET" = "linux-amd64" -o "$TARGET" = "linux-arm64" ]; then
     cat >"/etc/systemd/system/$SERVICE_NAME.service" <<EOF
 [Unit]
-Description=KUBI local agent
+Description=KUBI customer-side agent
 After=network-online.target
 Wants=network-online.target
 
@@ -78,6 +106,7 @@ ExecStart=$INSTALL_DIR/kubi-agent run
 Restart=always
 RestartSec=5
 Environment=NODE_ENV=production
+Environment=KUBI_AGENT_CONFIG=/etc/kubi-agent/agent.yaml
 
 [Install]
 WantedBy=multi-user.target

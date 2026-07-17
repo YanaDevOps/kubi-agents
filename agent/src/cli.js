@@ -2,13 +2,19 @@
 
 import os from 'node:os';
 import process from 'node:process';
-import { getAgentConfigPath, loadAgentConfig, LOCAL_AGENT_RUNTIME_API_VERSION, resolveAgentRuntimeConfig, saveAgentConfig } from './config.js';
+import { getAgentConfigPath, getAgentSettingsPath, loadAgentConfig, loadAgentSettings, LOCAL_AGENT_RUNTIME_API_VERSION, resolveAgentRuntimeConfig, saveAgentConfig, validateAgentSettings } from './config.js';
 import { registerAgentWithControlPlane, rotateAgentCredentials, sendAgentHeartbeat, syncDiscoveredCandidates } from './control-plane.js';
 import { createAgentLoopbackServer } from './server.js';
 import { scanLocalAccessDiscovery } from './kube.js';
+import { createAgentRelayClient } from './relay.js';
+import { createAgentLogger } from './logger.js';
 
-const AGENT_VERSION = process.env.KUBI_AGENT_VERSION || '0.1.0-dev';
-const AGENT_BUILD_ID = process.env.KUBI_AGENT_BUILD_ID || AGENT_VERSION;
+const AGENT_VERSION = typeof KUBI_AGENT_COMPILED_VERSION !== 'undefined'
+  ? KUBI_AGENT_COMPILED_VERSION
+  : process.env.KUBI_AGENT_VERSION || '0.1.0-dev';
+const AGENT_BUILD_ID = typeof KUBI_AGENT_COMPILED_BUILD_ID !== 'undefined'
+  ? KUBI_AGENT_COMPILED_BUILD_ID
+  : process.env.KUBI_AGENT_BUILD_ID || AGENT_VERSION;
 const DEFAULT_CAPABILITIES = {
   supportedModes: ['agent'],
   availableAuthKinds: ['unknown', 'token', 'client-cert', 'exec'],
@@ -36,6 +42,7 @@ function platformLabel() {
 }
 
 async function pairAgent(argv) {
+  const logger = createAgentLogger(loadAgentSettings().logging);
   const args = parseArgs(argv);
   const controlPlaneUrl = args['control-plane-url'];
   const pairingToken = args['pairing-token'];
@@ -65,14 +72,15 @@ async function pairAgent(argv) {
     platform: platformLabel()
   });
 
-  console.log(`Paired agent ${registration.agentId} to workspace ${registration.workspaceId}.`);
-  console.log(`Saved local config at ${configPath}.`);
-  console.log('Next step: node agent/src/cli.js run');
+  logger.info(`Paired agent ${registration.agentId} to workspace ${registration.workspaceId}.`);
+  logger.info(`Saved agent identity at ${configPath}.`);
+  logger.info('Next step: kubi-agent run');
 }
 
 async function runAgent() {
   const config = loadAgentConfig();
   const runtimeConfig = resolveAgentRuntimeConfig(config);
+  const logger = createAgentLogger(runtimeConfig.logging);
   const discoveryState = {
     candidateCount: 0,
     sourceCount: 0,
@@ -105,8 +113,23 @@ async function runAgent() {
   });
   await server.listen();
 
-  console.log(`KUBI agent loopback runtime listening on http://127.0.0.1:47641/v1`);
-  console.log(`Using config ${getAgentConfigPath()}`);
+  const relay = createAgentRelayClient({
+    runtimeConfig,
+    dispatch: server.dispatch,
+    platform: platformLabel(),
+    version: AGENT_VERSION,
+    capabilities: DEFAULT_CAPABILITIES,
+    onStatus(status) {
+      logger.info(status === 'connected' ? 'KUBI hosted relay connected.' : 'KUBI hosted relay disconnected; reconnecting.');
+    },
+    onError(error) {
+      logger.warn(`KUBI hosted relay: ${error.message}`);
+    }
+  });
+  relay.start();
+
+  logger.info('KUBI agent loopback runtime listening on http://127.0.0.1:47641/v1');
+  logger.info(`Using identity ${getAgentConfigPath()} and settings ${getAgentSettingsPath()}`);
 
   async function heartbeat() {
     try {
@@ -122,17 +145,17 @@ async function runAgent() {
         }
       });
     } catch (error) {
-      console.error(error instanceof Error ? error.message : 'Agent heartbeat failed.');
+      logger.error(error instanceof Error ? error.message : 'Agent heartbeat failed.');
     }
   }
 
   try {
     const discoveryResult = await refreshDiscovery();
     if (discoveryResult.warnings.length > 0) {
-      console.error(discoveryResult.warnings.join('\n'));
+      logger.warn(discoveryResult.warnings.join(' '));
     }
   } catch (error) {
-    console.error(error instanceof Error ? error.message : 'Initial access discovery failed.');
+    logger.error(error instanceof Error ? error.message : 'Initial access discovery failed.');
   }
 
   await heartbeat();
@@ -140,6 +163,7 @@ async function runAgent() {
 
   const shutdown = async () => {
     clearInterval(interval);
+    relay.close();
     await server.close().catch(() => undefined);
     process.exit(0);
   };
@@ -167,6 +191,26 @@ async function rotateAgent() {
   console.log('If the agent is already running, restart it so future heartbeats use the new credential.');
 }
 
+function printVersion() {
+  console.log(`kubi-agent ${AGENT_VERSION} (${AGENT_BUILD_ID}) runtime-api/${LOCAL_AGENT_RUNTIME_API_VERSION}`);
+}
+
+function configCommand(action) {
+  const settings = loadAgentSettings({ required: action === 'validate' });
+  validateAgentSettings(settings);
+  if (action === 'validate') {
+    console.log(`Configuration is valid: ${getAgentSettingsPath()}`);
+    return;
+  }
+  if (action === 'show') {
+    const identity = loadAgentConfig();
+    const effective = resolveAgentRuntimeConfig(identity);
+    console.log(JSON.stringify({ ...effective, agentSecret: '[redacted]' }, null, 2));
+    return;
+  }
+  throw new Error('Usage: kubi-agent config validate | config show --effective');
+}
+
 async function main() {
   const command = process.argv[2];
   if (command === 'pair') {
@@ -181,11 +225,22 @@ async function main() {
     await rotateAgent();
     return;
   }
+  if (command === 'version' || command === '--version' || command === '-v') {
+    printVersion();
+    return;
+  }
+  if (command === 'config') {
+    configCommand(process.argv[3] === 'show' && process.argv.includes('--effective') ? 'show' : process.argv[3]);
+    return;
+  }
 
   console.log('Usage:');
   console.log('  node agent/src/cli.js pair --control-plane-url <url> --pairing-token <token>');
   console.log('  node agent/src/cli.js run');
   console.log('  node agent/src/cli.js rotate');
+  console.log('  node agent/src/cli.js version');
+  console.log('  node agent/src/cli.js config validate');
+  console.log('  node agent/src/cli.js config show --effective');
 }
 
 main().catch((error) => {

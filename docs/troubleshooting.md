@@ -1,40 +1,31 @@
 # Troubleshooting
 
-## Pairing Fails
+## Token Expired
 
-- Confirm the pairing token was generated for the correct workspace.
-- Generate a new token if the existing token expired or was deleted.
-- Confirm the agent host can reach `https://app.kubi.live`.
+An unused pairing token expires after 30 minutes and cannot be reused. Create a new token in **Connections → Agent**. Existing paired agents are unaffected.
 
-## Agent Is Offline
-
-- Check the service status:
+## Agent Offline or Relay Disconnected
 
 ```sh
 systemctl status kubi-agent
+journalctl -u kubi-agent -n 100
+curl -I https://app.kubi.live
 ```
 
-```powershell
-Get-Service kubi-agent
-```
+Confirm outbound HTTPS/WSS on port 443 is allowed. The log should report `KUBI hosted relay connected.`
 
-- Restart the service after credential rotation.
-- Confirm outbound HTTPS is allowed.
+## No Kubeconfigs
 
-## No Kubeconfigs Are Discovered
+Edit `/etc/kubi-agent/agent.yaml`, add the real files under `discovery.kubeconfig_paths`, run `kubi-agent config validate`, and restart the service. Confirm the service account can read every referenced kubeconfig, CA, client certificate, and key.
 
-- Set `KUBI_AGENT_KUBECONFIG` to an explicit kubeconfig path.
-- Set `KUBI_AGENT_CONTEXT` if the default/current context is not the intended one.
-- Confirm the user running the service can read the kubeconfig file.
+## Rescan Fails
 
-## Browser Cannot Reach The Agent
+Rescan is delivered through the hosted relay. Check relay connectivity first, then confirm each kubeconfig parses and referenced exec plugins are available to the systemd service.
 
-- Confirm the agent process is listening on `127.0.0.1:47641`.
-- Open KUBI from `https://app.kubi.live`.
-- Check local firewall or endpoint protection rules.
+## Connect Fails
 
-## Kubernetes Reads Fail
+KUBI runs a Kubernetes API probe before marking a context connected. Verify the same context using `kubectl --kubeconfig <path> --context <name> get namespaces` on the agent host. Check DNS, routing, TLS files, exec-plugin environment, and Kubernetes RBAC.
 
-- Verify the kubeconfig works locally with `kubectl`.
-- Confirm RBAC allows read-only access to the requested resources.
-- Confirm optional APIs such as `metrics.k8s.io` are installed when viewing metrics.
+## Update Required
+
+The installed binary is below the minimum hosted version or reports development build metadata. Download the current binary from the latest GitHub Release, replace it, verify `kubi-agent version`, and restart the service.

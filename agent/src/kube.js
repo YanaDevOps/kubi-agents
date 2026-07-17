@@ -704,6 +704,22 @@ function listDiscoverySourceFiles(runtimeConfig) {
     addSource(runtimeConfig.kubeconfigPath, 'configured');
   }
 
+  for (const [index, configuredPath] of (runtimeConfig.kubeconfigPaths || []).entries()) {
+    addSource(configuredPath, 'configured', index);
+  }
+
+  for (const directory of runtimeConfig.kubeconfigDirectories || []) {
+    try {
+      fs.readdirSync(directory, { withFileTypes: true })
+        .filter((entry) => entry.isFile() && /\.(ya?ml|conf)$/i.test(entry.name))
+        .map((entry) => entry.name)
+        .sort((left, right) => left.localeCompare(right))
+        .forEach((entry) => addSource(path.join(directory, entry), 'directory'));
+    } catch {
+      // Discovery reports unreadable configured sources after attempting explicit files.
+    }
+  }
+
   if (process.env.KUBECONFIG) {
     process.env.KUBECONFIG.split(path.delimiter)
       .map((entry) => entry.trim())

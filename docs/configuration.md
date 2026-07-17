@@ -1,49 +1,36 @@
 # Configuration
 
-After pairing, the agent stores a local config file:
+Linux installations create `/etc/kubi-agent/agent.yaml`. Edit it and restart `kubi-agent`; hot reload is intentionally not used.
 
-- Linux/macOS: `${XDG_CONFIG_HOME:-~/.config}/kubi-agent/config.json`
-- Windows: `%APPDATA%\kubi-agent\config.json`
+```yaml
+relay:
+  url: https://app.kubi.live
 
-The file contains the paired agent ID, control-plane URL, and long-lived agent credential. Treat it as sensitive.
+discovery:
+  kubeconfig_paths:
+    - /etc/rancher/k3s/k3s.yaml
+    - /srv/kubeconfigs/production.yaml
+  # kubeconfig_directories:
+  #   - /srv/kubeconfigs
+  # context: production
+  # namespace: default
 
-## Environment Variables
-
-| Variable | Description |
-| --- | --- |
-| `KUBI_AGENT_CONTROL_PLANE_URL` | Override the paired control-plane URL |
-| `KUBI_AGENT_KUBECONFIG` | Kubeconfig path to use instead of the default kubeconfig resolution |
-| `KUBI_AGENT_CONTEXT` | Force a Kubernetes context |
-| `KUBI_AGENT_NAMESPACE` | Default namespace scope for local runtime reads |
-| `KUBI_AGENT_ALERTING_CONFIG` | Alerting rules/config path |
-| `KUBI_AGENT_ALERTING_HISTORY` | Alerting history path |
-| `KUBI_AGENT_VERSION` | Runtime version override, normally set at build time |
-| `KUBI_AGENT_BUILD_ID` | Runtime build ID override, normally set at build time |
-
-## Commands
-
-### `pair`
-
-Pairs the local agent with a workspace.
-
-```sh
-kubi-agent pair --control-plane-url <url> --pairing-token <token> [--display-name <name>]
+logging:
+  level: info
+  outputs:
+    - stdout
+  # file:
+  #   path: /var/log/kubi-agent/agent.log
+  #   max_size_mb: 10
+  #   max_files: 5
 ```
 
-### `run` / `serve`
+`kubeconfig_paths` accepts files from a cluster node or gateway host. Every API endpoint referenced by those files must already be reachable from that host. `kubeconfig_directories` scans `.yaml`, `.yml`, and `.conf` files.
 
-Starts the local loopback runtime and heartbeat loop.
+The pairing identity remains separate in `${XDG_CONFIG_HOME:-~/.config}/kubi-agent/config.json` or `%APPDATA%\kubi-agent\config.json`. It has mode `0600` and must be treated as a secret.
 
-```sh
-kubi-agent run
-```
+Environment variables override YAML: `KUBI_AGENT_CONFIG`, `KUBI_AGENT_CONTROL_PLANE_URL`, `KUBI_AGENT_KUBECONFIG`, `KUBECONFIG`, `KUBI_AGENT_CONTEXT`, `KUBI_AGENT_NAMESPACE`, `KUBI_AGENT_ALERTING_CONFIG`, and `KUBI_AGENT_ALERTING_HISTORY`.
 
-### `rotate`
+Use `kubi-agent config validate` before restart and `kubi-agent config show --effective` to inspect merged settings. Identity secrets are redacted.
 
-Rotates the long-lived agent credential with the control plane.
-
-```sh
-kubi-agent rotate
-```
-
-Restart the agent service after rotation.
+By default systemd captures stdout/stderr in journald. Optional file output uses size rotation and never intentionally logs kubeconfig contents, tokens, certificates, or Kubernetes response payloads.

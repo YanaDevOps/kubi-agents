@@ -18,3 +18,4 @@ jobs:
       - run: bun run check
       - run: bun test
       - run: bun run build:linux-amd64
+      - run: dist/kubi-agent-linux-amd64 version
