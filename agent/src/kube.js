@@ -3377,14 +3377,19 @@ function uniqueEvidence(evidence) {
 }
 
 function componentConfidence(evidence) {
-  const score = evidence.reduce((current, entry) => current + (entry.kind === 'deployment' || entry.kind === 'daemonset' || entry.kind === 'service' ? 2 : 1), 0);
+  const score = evidence.reduce(
+    (current, entry) => current + (['deployment', 'statefulset', 'daemonset', 'service', 'storageclass', 'csidriver'].includes(entry.kind) ? 2 : 1),
+    0
+  );
   if (score >= 4) return 'high';
   if (score >= 2) return 'medium';
   return 'low';
 }
 
 function componentStatusFor(evidence) {
-  return evidence.some((entry) => entry.kind === 'deployment' || entry.kind === 'daemonset' || entry.kind === 'service') ? 'detected' : 'partial';
+  return evidence.some((entry) => ['deployment', 'statefulset', 'daemonset', 'service', 'storageclass', 'csidriver'].includes(entry.kind))
+    ? 'detected'
+    : 'partial';
 }
 
 function componentSummary(key, name, category, summary, evidence) {
@@ -3412,16 +3417,65 @@ function matchNamespaceEvidence(namespaces, ...names) {
 
 function matchDeploymentEvidence(deployments, predicate) {
   return deployments
+    .filter((record) => predicate(metadataFor(record), record))
     .map(metadataFor)
-    .filter(predicate)
     .map((meta) => ({ kind: 'deployment', name: meta.name, namespace: meta.namespace }));
 }
 
 function matchDaemonSetEvidence(daemonSets, predicate) {
   return daemonSets
+    .filter((record) => predicate(metadataFor(record), record))
     .map(metadataFor)
-    .filter(predicate)
     .map((meta) => ({ kind: 'daemonset', name: meta.name, namespace: meta.namespace }));
+}
+
+function matchStatefulSetEvidence(statefulSets, predicate) {
+  return statefulSets
+    .filter(predicate)
+    .map(metadataFor)
+    .map((meta) => ({ kind: 'statefulset', name: meta.name, namespace: meta.namespace }));
+}
+
+function workloadSearchText(record) {
+  const meta = metadataFor(record);
+  const template = asRecord(asRecord(record.spec)?.template);
+  const podSpec = asRecord(template?.spec);
+  const containers = [...asRecordArray(podSpec?.containers), ...asRecordArray(podSpec?.initContainers)];
+  return [
+    meta.name,
+    meta.namespace,
+    ...Object.keys(meta.labels),
+    ...Object.values(meta.labels),
+    ...containers.flatMap((container) => [stringOrUndefined(container.name) || '', stringOrUndefined(container.image) || ''])
+  ]
+    .join(' ')
+    .toLowerCase();
+}
+
+function workloadContains(record, needles) {
+  const text = workloadSearchText(record);
+  return needles.some((needle) => text.includes(needle));
+}
+
+function matchStorageClassEvidence(storageClasses, needles) {
+  return storageClasses
+    .filter((record) => {
+      const meta = metadataFor(record);
+      const provisioner = stringOrUndefined(record.provisioner) || '';
+      const text = `${meta.name} ${provisioner}`.toLowerCase();
+      return needles.some((needle) => text.includes(needle));
+    })
+    .map((record) => {
+      const meta = metadataFor(record);
+      return { kind: 'storageclass', name: meta.name, detail: stringOrUndefined(record.provisioner) };
+    });
+}
+
+function matchCsiDriverEvidence(csiDrivers, needles) {
+  return csiDrivers
+    .map(metadataFor)
+    .filter((meta) => needles.some((needle) => meta.name.toLowerCase().includes(needle)))
+    .map((meta) => ({ kind: 'csidriver', name: meta.name }));
 }
 
 function matchIngressClassEvidence(ingressClasses, predicate) {
@@ -4358,7 +4412,10 @@ export async function loadLocalComponentInventory(runtimeConfig) {
     const requests = await Promise.allSettled([
       fetchKubeList(kubeConfig, '/api/v1/namespaces'),
       fetchKubeList(kubeConfig, '/apis/apps/v1/deployments'),
+      fetchKubeList(kubeConfig, '/apis/apps/v1/statefulsets'),
       fetchKubeList(kubeConfig, '/apis/apps/v1/daemonsets'),
+      fetchKubeList(kubeConfig, '/apis/storage.k8s.io/v1/storageclasses'),
+      fetchKubeList(kubeConfig, '/apis/storage.k8s.io/v1/csidrivers'),
       fetchKubeList(kubeConfig, '/apis/networking.k8s.io/v1/ingressclasses'),
       fetchKubeList(kubeConfig, '/apis/apiextensions.k8s.io/v1/customresourcedefinitions')
     ]);
@@ -4378,16 +4435,28 @@ export async function loadLocalComponentInventory(runtimeConfig) {
         ? asRecordArray(requests[1].value.items)
         : (partial = true, issues.push(partialIssue('components', 'Deployments could not be loaded for component detection.')), []);
     const daemonSets =
-      requests[2].status === 'fulfilled'
-        ? asRecordArray(requests[2].value.items)
-        : (partial = true, issues.push(partialIssue('components', 'DaemonSets could not be loaded for component detection.')), []);
-    const ingressClasses =
       requests[3].status === 'fulfilled'
         ? asRecordArray(requests[3].value.items)
-        : (partial = true, issues.push(partialIssue('components', 'IngressClasses could not be loaded for component detection.')), []);
-    const crds =
+        : (partial = true, issues.push(partialIssue('components', 'DaemonSets could not be loaded for component detection.')), []);
+    const statefulSets =
+      requests[2].status === 'fulfilled'
+        ? asRecordArray(requests[2].value.items)
+        : (partial = true, issues.push(partialIssue('components', 'StatefulSets could not be loaded for component detection.')), []);
+    const storageClasses =
       requests[4].status === 'fulfilled'
         ? asRecordArray(requests[4].value.items)
+        : (partial = true, issues.push(partialIssue('components', 'StorageClasses could not be loaded for component detection.')), []);
+    const csiDrivers =
+      requests[5].status === 'fulfilled'
+        ? asRecordArray(requests[5].value.items)
+        : (partial = true, issues.push(partialIssue('components', 'CSIDrivers could not be loaded for component detection.')), []);
+    const ingressClasses =
+      requests[6].status === 'fulfilled'
+        ? asRecordArray(requests[6].value.items)
+        : (partial = true, issues.push(partialIssue('components', 'IngressClasses could not be loaded for component detection.')), []);
+    const crds =
+      requests[7].status === 'fulfilled'
+        ? asRecordArray(requests[7].value.items)
         : (partial = true, issues.push(partialIssue('components', 'CustomResourceDefinitions could not be loaded for component detection.')), []);
 
     if (requests.some((entry) => entry.status === 'fulfilled' && entry.value.truncated)) {
@@ -4526,6 +4595,59 @@ export async function loadLocalComponentInventory(runtimeConfig) {
         [...matchDeploymentEvidence(deployments, (meta) => meta.name === 'metrics-server')]
       ),
       componentSummary(
+        'prometheus',
+        'Prometheus',
+        'observability',
+        'Prometheus evidence from controller workloads or monitoring.coreos.com CRDs.',
+        [
+          ...matchDeploymentEvidence(deployments, (_meta, record) => workloadContains(record, ['prometheus'])),
+          ...matchStatefulSetEvidence(statefulSets, (record) => workloadContains(record, ['prometheus'])),
+          ...matchDaemonSetEvidence(daemonSets, (_meta, record) => workloadContains(record, ['prometheus'])),
+          ...matchCrdEvidence(crds, (record) => stringOrUndefined(asRecord(record.spec)?.group) === 'monitoring.coreos.com')
+        ]
+      ),
+      componentSummary(
+        'grafana',
+        'Grafana',
+        'observability',
+        'Grafana evidence from workload names, labels, or container images.',
+        [
+          ...matchDeploymentEvidence(deployments, (_meta, record) => workloadContains(record, ['grafana'])),
+          ...matchStatefulSetEvidence(statefulSets, (record) => workloadContains(record, ['grafana'])),
+          ...matchDaemonSetEvidence(daemonSets, (_meta, record) => workloadContains(record, ['grafana']))
+        ]
+      ),
+      componentSummary(
+        'victoria-metrics',
+        'VictoriaMetrics',
+        'observability',
+        'VictoriaMetrics evidence from operator CRDs or VictoriaMetrics workloads.',
+        [
+          ...matchDeploymentEvidence(deployments, (_meta, record) =>
+            workloadContains(record, ['victoriametrics', 'victoria-metrics', 'vmagent', 'vmsingle', 'vmstorage', 'vminsert', 'vmselect'])
+          ),
+          ...matchStatefulSetEvidence(statefulSets, (record) =>
+            workloadContains(record, ['victoriametrics', 'victoria-metrics', 'vmagent', 'vmsingle', 'vmstorage', 'vminsert', 'vmselect'])
+          ),
+          ...matchDaemonSetEvidence(daemonSets, (_meta, record) => workloadContains(record, ['victoriametrics', 'victoria-metrics', 'vmagent'])),
+          ...matchCrdEvidence(crds, (record) => stringOrUndefined(asRecord(record.spec)?.group)?.includes('victoriametrics.com') === true)
+        ]
+      ),
+      componentSummary(
+        'vitastor',
+        'Vitastor',
+        'storage',
+        'Vitastor evidence from CSI resources, storage classes, or controller workloads.',
+        [
+          ...matchNamespaceEvidence(namespaces, 'vitastor-system'),
+          ...matchDeploymentEvidence(deployments, (_meta, record) => workloadContains(record, ['vitastor'])),
+          ...matchStatefulSetEvidence(statefulSets, (record) => workloadContains(record, ['vitastor'])),
+          ...matchDaemonSetEvidence(daemonSets, (_meta, record) => workloadContains(record, ['vitastor'])),
+          ...matchStorageClassEvidence(storageClasses, ['vitastor']),
+          ...matchCsiDriverEvidence(csiDrivers, ['vitastor'])
+        ]
+      ),
+      componentSummary(
         'cert-manager',
         'cert-manager',
         'certificates',
@@ -4585,6 +4707,7 @@ export async function loadLocalComponentInventory(runtimeConfig) {
     const summary = {
       ingress: items.filter((item) => item.category === 'ingress').length,
       networking: items.filter((item) => item.category === 'networking').length,
+      storage: items.filter((item) => item.category === 'storage').length,
       certificates: items.filter((item) => item.category === 'certificates').length,
       dns: items.filter((item) => item.category === 'dns').length,
       observability: items.filter((item) => item.category === 'observability').length,
