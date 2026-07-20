@@ -1496,6 +1496,15 @@ function podStatusMessage(record) {
   return stringOrUndefined(waiting?.message) || stringOrUndefined(terminated?.message) || stringOrUndefined(status?.message);
 }
 
+function podLastRestartAt(status) {
+  const timestamps = [...asRecordArray(status?.initContainerStatuses), ...asRecordArray(status?.containerStatuses)]
+    .filter((entry) => numberOrZero(entry.restartCount) > 0)
+    .map((entry) => stringOrUndefined(asRecord(asRecord(entry.lastState)?.terminated)?.finishedAt))
+    .filter(Boolean)
+    .sort((left, right) => new Date(left).getTime() - new Date(right).getTime());
+  return timestamps.at(-1);
+}
+
 function podResourceTotals(containers) {
   return asRecordArray(containers).reduce(
     (total, container) => {
@@ -1532,6 +1541,7 @@ function normalizeRuntimePod(record) {
     statusMessage: podStatusMessage(record),
     ready: isPodReady(record),
     restarts: containers.reduce((total, container) => total + container.restartCount, 0),
+    lastRestartAt: podLastRestartAt(status),
     nodeName: stringOrUndefined(spec?.nodeName),
     podIp: stringOrUndefined(status?.podIP),
     podIps: asRecordArray(status?.podIPs).map((entry) => stringOrUndefined(entry.ip)).filter(Boolean),

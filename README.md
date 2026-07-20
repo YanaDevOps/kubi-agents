@@ -11,6 +11,7 @@ Agent `v0.1.8` and newer also detect CNI providers from Node metadata and can re
 Agent `v0.1.9` and newer correctly treat the UI `all` scope as a cluster-wide list and resolve kubelet volume names through Pod specs when summaries omit `pvcRef`.
 Agent `v0.1.10` and newer validate kubelet PVC samples against declared volume capacity. Node-filesystem statistics incorrectly attributed to a local PVC are ignored instead of being shown as PVC usage, and active Pod mounts are reported alongside each claim.
 Agent `v0.1.11` and newer negotiate Pod and Job log responses with Kubernetes API servers that reject a `text/plain`-only Accept header.
+Agent `v0.1.12` and newer expose the latest container restart timestamp so KUBI can distinguish current health from restart history.
 
 ## Install
 

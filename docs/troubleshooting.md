@@ -32,6 +32,10 @@ If KUBI reports an ambiguous context, cluster, or user name, inspect configured 
 
 Update to agent `v0.1.11` or newer, then restart the service. If logs still fail, verify that the kubeconfig identity can `get` the `pods/log` subresource in the selected namespace and that the requested container is running or has retained logs.
 
+## Restart Time Is Unavailable
+
+Update to agent `v0.1.12` or newer, then restart the service. Older agents report the cumulative restart count but do not include the timestamp of the latest terminated container state.
+
 ## PVC Usage Is Unavailable
 
 Agent `v0.1.8` and newer use the Kubernetes API `nodes/proxy` subresource to read kubelet volume summaries. This permission is optional. Without it, requested capacity and storage inventory still work, but used bytes are shown as unavailable. Grant `get` on `nodes/proxy` only when that additional read is acceptable for your cluster policy.
