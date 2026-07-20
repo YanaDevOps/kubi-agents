@@ -4,7 +4,7 @@ import https from 'node:https';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { discoverLocalAccessCandidates, fetchKubeJson, resolveAgentRuntimeConfigForSelector } from '../agent/src/kube.js';
+import { discoverLocalAccessCandidates, fetchKubeJson, fetchKubeText, resolveAgentRuntimeConfigForSelector } from '../agent/src/kube.js';
 
 const kubeconfig = (server = 'https://shared.invalid') => `apiVersion: v1
 kind: Config
@@ -49,6 +49,38 @@ describe('kubeconfig source merge', () => {
     } finally {
       agent.destroy();
       globalThis.fetch = previousFetch;
+      await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
+  });
+
+  test('negotiates Kubernetes logs without a text/plain-only Accept header', async () => {
+    const certificate = fs.readFileSync(fileURLToPath(new URL('./fixtures/tls/localhost-cert.pem', import.meta.url)), 'utf8');
+    const privateKey = fs.readFileSync(fileURLToPath(new URL('./fixtures/tls/localhost-key.pem', import.meta.url)), 'utf8');
+    const agent = new https.Agent({ ca: certificate });
+    let receivedAccept = '';
+    const server = https.createServer({ cert: certificate, key: privateKey }, (request, response) => {
+      receivedAccept = request.headers.accept || '';
+      if (receivedAccept !== '*/*') {
+        response.writeHead(406);
+        response.end();
+        return;
+      }
+      response.writeHead(200, { 'content-type': 'text/plain' });
+      response.end('booted\nready\n');
+    });
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('Test server did not start.');
+
+    try {
+      const logs = await fetchKubeText({
+        getCurrentCluster: () => ({ server: `https://127.0.0.1:${address.port}` }),
+        applyToFetchOptions: async (options) => ({ ...options, agent })
+      }, '/api/v1/namespaces/default/pods/web/log?tailLines=2');
+      expect(receivedAccept).toBe('*/*');
+      expect(logs).toBe('booted\nready\n');
+    } finally {
+      agent.destroy();
       await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     }
   });

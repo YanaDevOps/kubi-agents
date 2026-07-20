@@ -140,12 +140,12 @@ export async function fetchKubeJson(kubeConfig, pathWithQuery) {
   }
 }
 
-async function fetchKubeText(kubeConfig, pathWithQuery) {
+export async function fetchKubeText(kubeConfig, pathWithQuery) {
   const url = new URL(pathWithQuery, baseServerUrl(kubeConfig));
   const requestOptions = await kubeConfig.applyToFetchOptions({
     method: 'GET',
     headers: {
-      accept: 'text/plain'
+      accept: '*/*'
     }
   });
 
