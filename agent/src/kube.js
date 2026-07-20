@@ -583,7 +583,9 @@ function normalizeService(record, endpointSlices, endpointsAvailable) {
 }
 
 export function namespacePath(clusterPath, namespacedPath, namespaceScope) {
-  return namespaceScope ? namespacedPath.replace(':namespace', encodeURIComponent(namespaceScope)) : clusterPath;
+  return namespaceScope && namespaceScope !== 'all'
+    ? namespacedPath.replace(':namespace', encodeURIComponent(namespaceScope))
+    : clusterPath;
 }
 
 function truncationIssue(resource, message) {
@@ -3240,15 +3242,20 @@ function normalizePersistentVolumeClaim(record) {
   };
 }
 
-export function parseNodeSummaryPVCUsage(payload) {
+export function parseNodeSummaryPVCUsage(payload, podVolumeClaims = new Map()) {
   const usage = new Map();
   for (const pod of asRecordArray(asRecord(payload)?.pods)) {
     const podNamespace = stringOrUndefined(asRecord(pod.podRef)?.namespace) || 'default';
+    const podName = stringOrUndefined(asRecord(pod.podRef)?.name) || '';
     const volumes = [...asRecordArray(pod.volume), ...asRecordArray(pod.volumes)];
     for (const volume of volumes) {
       const pvcRef = asRecord(volume.pvcRef);
-      const name = stringOrUndefined(pvcRef?.name);
-      const namespace = stringOrUndefined(pvcRef?.namespace) || podNamespace;
+      const directName = stringOrUndefined(pvcRef?.name);
+      const volumeName = stringOrUndefined(volume.name);
+      const mappedClaim = volumeName && podName ? podVolumeClaims.get(`${podNamespace}/${podName}/${volumeName}`) : undefined;
+      const mappedParts = typeof mappedClaim === 'string' ? mappedClaim.split('/') : [];
+      const name = directName || mappedParts.slice(1).join('/');
+      const namespace = stringOrUndefined(pvcRef?.namespace) || mappedParts[0] || podNamespace;
       const usedBytes = Number(volume.usedBytes);
       if (!name || !Number.isFinite(usedBytes) || usedBytes < 0) continue;
       const key = `${namespace}/${name}`;
@@ -3260,8 +3267,15 @@ export function parseNodeSummaryPVCUsage(payload) {
 
 async function loadPVCUsage(kubeConfig) {
   let nodes;
+  let pods = [];
   try {
-    nodes = await fetchKubeList(kubeConfig, '/api/v1/nodes');
+    const requests = await Promise.allSettled([
+      fetchKubeList(kubeConfig, '/api/v1/nodes'),
+      fetchKubeList(kubeConfig, '/api/v1/pods')
+    ]);
+    if (requests[0].status === 'rejected') throw requests[0].reason;
+    nodes = requests[0].value;
+    pods = requests[1].status === 'fulfilled' ? asRecordArray(requests[1].value.items) : [];
   } catch (error) {
     const message = sanitizeKubeError(error);
     return {
@@ -3280,6 +3294,17 @@ async function loadPVCUsage(kubeConfig) {
   }
 
   const nodeNames = asRecordArray(nodes.items).map((node) => metadataFor(node).name).filter(Boolean);
+  const podVolumeClaims = new Map();
+  for (const pod of pods) {
+    const meta = metadataFor(pod);
+    for (const volume of asRecordArray(asRecord(pod.spec)?.volumes)) {
+      const volumeName = stringOrUndefined(volume.name);
+      const claimName = stringOrUndefined(asRecord(volume.persistentVolumeClaim)?.claimName);
+      if (volumeName && claimName) {
+        podVolumeClaims.set(`${meta.namespace}/${meta.name}/${volumeName}`, `${meta.namespace}/${claimName}`);
+      }
+    }
+  }
   const usage = new Map();
   let sampledNodes = 0;
   let failedNodes = 0;
@@ -3296,7 +3321,7 @@ async function loadPVCUsage(kubeConfig) {
         return;
       }
       sampledNodes += 1;
-      for (const [key, value] of parseNodeSummaryPVCUsage(result.value)) {
+      for (const [key, value] of parseNodeSummaryPVCUsage(result.value, podVolumeClaims)) {
         usage.set(key, Math.max(usage.get(key) || 0, value));
       }
     });
