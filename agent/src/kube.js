@@ -3235,6 +3235,7 @@ function normalizePersistentVolumeClaim(record) {
     conditions,
     requested: stringOrUndefined(requests?.storage),
     capacity: stringOrUndefined(asRecord(status?.capacity)?.storage),
+    mountedByPods: [],
     storageClassName: stringOrUndefined(spec?.storageClassName),
     accessModes: Array.isArray(spec?.accessModes) ? spec.accessModes.filter((value) => typeof value === 'string') : [],
     volumeName: stringOrUndefined(spec?.volumeName),
@@ -3257,12 +3258,24 @@ export function parseNodeSummaryPVCUsage(payload, podVolumeClaims = new Map()) {
       const name = directName || mappedParts.slice(1).join('/');
       const namespace = stringOrUndefined(pvcRef?.namespace) || mappedParts[0] || podNamespace;
       const usedBytes = Number(volume.usedBytes);
-      if (!name || !Number.isFinite(usedBytes) || usedBytes < 0) continue;
+      const capacityBytes = Number(volume.capacityBytes);
+      if (!name || !Number.isFinite(usedBytes) || usedBytes < 0 || !Number.isFinite(capacityBytes) || capacityBytes <= 0) continue;
       const key = `${namespace}/${name}`;
-      usage.set(key, Math.max(usage.get(key) || 0, usedBytes));
+      const current = usage.get(key);
+      if (!current || usedBytes > current.usedBytes) usage.set(key, { usedBytes, capacityBytes });
     }
   }
   return usage;
+}
+
+export function isReliablePVCUsageSample(sample, declaredCapacityBytes) {
+  if (!sample || !Number.isFinite(declaredCapacityBytes) || declaredCapacityBytes <= 0) return false;
+  if (!Number.isFinite(sample.usedBytes) || sample.usedBytes < 0) return false;
+  if (!Number.isFinite(sample.capacityBytes) || sample.capacityBytes <= 0) return false;
+  const capacityRatio = sample.capacityBytes / declaredCapacityBytes;
+  if (capacityRatio < 0.75 || capacityRatio > 1.25) return false;
+  if (sample.usedBytes > sample.capacityBytes) return false;
+  return sample.usedBytes <= declaredCapacityBytes * 1.05;
 }
 
 async function loadPVCUsage(kubeConfig) {
@@ -3280,6 +3293,7 @@ async function loadPVCUsage(kubeConfig) {
     const message = sanitizeKubeError(error);
     return {
       usage: new Map(),
+      mountedByPods: new Map(),
       status: {
         available: false,
         partial: false,
@@ -3295,13 +3309,22 @@ async function loadPVCUsage(kubeConfig) {
 
   const nodeNames = asRecordArray(nodes.items).map((node) => metadataFor(node).name).filter(Boolean);
   const podVolumeClaims = new Map();
+  const mountedByPods = new Map();
   for (const pod of pods) {
     const meta = metadataFor(pod);
+    const phase = (stringOrUndefined(asRecord(pod.status)?.phase) || '').toLowerCase();
+    const active = !asRecord(pod.metadata)?.deletionTimestamp && phase !== 'succeeded' && phase !== 'failed';
     for (const volume of asRecordArray(asRecord(pod.spec)?.volumes)) {
       const volumeName = stringOrUndefined(volume.name);
       const claimName = stringOrUndefined(asRecord(volume.persistentVolumeClaim)?.claimName);
       if (volumeName && claimName) {
-        podVolumeClaims.set(`${meta.namespace}/${meta.name}/${volumeName}`, `${meta.namespace}/${claimName}`);
+        const claimKey = `${meta.namespace}/${claimName}`;
+        podVolumeClaims.set(`${meta.namespace}/${meta.name}/${volumeName}`, claimKey);
+        if (active) {
+          const mounted = mountedByPods.get(claimKey) || new Set();
+          mounted.add(meta.name);
+          mountedByPods.set(claimKey, mounted);
+        }
       }
     }
   }
@@ -3322,7 +3345,8 @@ async function loadPVCUsage(kubeConfig) {
       }
       sampledNodes += 1;
       for (const [key, value] of parseNodeSummaryPVCUsage(result.value, podVolumeClaims)) {
-        usage.set(key, Math.max(usage.get(key) || 0, value));
+        const current = usage.get(key);
+        if (!current || value.usedBytes > current.usedBytes) usage.set(key, value);
       }
     });
   }
@@ -3331,6 +3355,7 @@ async function loadPVCUsage(kubeConfig) {
   const partial = available && failedNodes > 0;
   return {
     usage,
+    mountedByPods,
     status: {
       available,
       partial,
@@ -3751,11 +3776,22 @@ export async function loadLocalStorage(runtimeConfig, namespaceScope = null) {
     );
     const pvcUsage = await loadPVCUsage(kubeConfig);
     const usageObservedAt = new Date().toISOString();
+    let validUsageCount = 0;
+    let discardedSamples = 0;
     persistentVolumeClaims.items = persistentVolumeClaims.items.map((claim) => {
-      const usedBytes = pvcUsage.usage.get(`${claim.namespace}/${claim.name}`);
-      return Number.isFinite(usedBytes)
-        ? { ...claim, usedBytes, usageSource: 'kubelet-summary', usageObservedAt }
-        : claim;
+      const key = `${claim.namespace}/${claim.name}`;
+      const sample = pvcUsage.usage.get(key);
+      const mounted = [...(pvcUsage.mountedByPods.get(key) || [])].sort();
+      if (!isReliablePVCUsageSample(sample, parseBytes(claim.capacity || claim.requested))) {
+        if (sample) discardedSamples += 1;
+        return {
+          ...claim,
+          mountedByPods: mounted,
+          ...(sample ? { usageUnavailableReason: 'Kubelet reported filesystem capacity that does not match this PVC.' } : {})
+        };
+      }
+      validUsageCount += 1;
+      return { ...claim, usedBytes: sample.usedBytes, usageSource: 'kubelet-summary', usageObservedAt, mountedByPods: mounted };
     });
     const claimUsageByVolume = new Map(
       persistentVolumeClaims.items
@@ -3769,6 +3805,21 @@ export async function loadLocalStorage(runtimeConfig, namespaceScope = null) {
         : volume;
     });
     const providers = buildStorageProviders(storageClasses.items, csiDrivers.items);
+    const usageAvailable = validUsageCount > 0;
+    const usagePartial = usageAvailable && (pvcUsage.status.failedNodes > 0 || discardedSamples > 0);
+    const usageStatus = {
+      ...pvcUsage.status,
+      available: usageAvailable,
+      partial: usagePartial,
+      discardedSamples,
+      message: usageAvailable
+        ? usagePartial
+          ? `PVC usage is partial; ${pvcUsage.status.failedNodes} node(s) were unavailable and ${discardedSamples} unreliable sample(s) were ignored.`
+          : `PVC usage sampled from ${pvcUsage.status.sampledNodes} node(s).`
+        : discardedSamples > 0
+          ? `PVC usage is unavailable because ${discardedSamples} kubelet sample(s) did not match the declared volume capacity.`
+          : pvcUsage.status.message
+    };
 
     return {
       namespaceScope: effectiveNamespace,
@@ -3791,7 +3842,7 @@ export async function loadLocalStorage(runtimeConfig, namespaceScope = null) {
         requestedBytes: persistentVolumeClaims.items.reduce((sum, claim) => sum + parseBytes(claim.requested), 0),
         usedBytes: persistentVolumeClaims.items.reduce((sum, claim) => sum + (Number.isFinite(claim.usedBytes) ? claim.usedBytes : 0), 0)
       },
-      usageStatus: pvcUsage.status,
+      usageStatus,
       providers,
       storageClasses,
       persistentVolumes,

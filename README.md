@@ -9,6 +9,7 @@ Agent `v0.1.6` and newer report the running binary version and build through run
 Agent `v0.1.7` and newer detect platform extensions from StatefulSets, CSI drivers, StorageClasses, workload images, and operator CRDs. This includes Vitastor, Grafana, Prometheus, and VictoriaMetrics evidence without storing Kubernetes credentials in SaaS.
 Agent `v0.1.8` and newer also detect CNI providers from Node metadata and can report best-effort PVC usage through the Kubernetes `nodes/proxy` read path. Core storage inventory remains available when that optional permission is absent.
 Agent `v0.1.9` and newer correctly treat the UI `all` scope as a cluster-wide list and resolve kubelet volume names through Pod specs when summaries omit `pvcRef`.
+Agent `v0.1.10` and newer validate kubelet PVC samples against declared volume capacity. Node-filesystem statistics incorrectly attributed to a local PVC are ignored instead of being shown as PVC usage, and active Pod mounts are reported alongside each claim.
 
 ## Install
 
