@@ -28,6 +28,10 @@ KUBI runs a Kubernetes API probe before marking a context connected. Verify the 
 
 If KUBI reports an ambiguous context, cluster, or user name, inspect configured paths, `KUBECONFIG`, and `~/.kube/config`. Identical copies are merged automatically; entries with the same name but different endpoints or credentials must be removed or renamed before rescanning.
 
+## PVC Usage Is Unavailable
+
+Agent `v0.1.8` and newer use the Kubernetes API `nodes/proxy` subresource to read kubelet volume summaries. This permission is optional. Without it, requested capacity and storage inventory still work, but used bytes are shown as unavailable. Grant `get` on `nodes/proxy` only when that additional read is acceptable for your cluster policy.
+
 ## Relay Reconnects
 
 The agent keeps heartbeat and runtime relay connectivity separate. Agent `v0.1.5` and newer actively probes the WebSocket and reconnects automatically after a SaaS rollout or transient network failure. A short `relay disconnected; reconnecting` message is expected during recovery; no manual service restart should be required.

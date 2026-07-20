@@ -7,6 +7,7 @@ Raw kubeconfigs, client certificates, exec credentials, and bearer tokens remain
 Agent `v0.1.5` and newer monitor the hosted WebSocket with ping/pong probes and reconnect automatically when a SaaS rollout or network interruption leaves the previous relay connection stale.
 Agent `v0.1.6` and newer report the running binary version and build through runtime health after an in-place upgrade; re-pairing is not required.
 Agent `v0.1.7` and newer detect platform extensions from StatefulSets, CSI drivers, StorageClasses, workload images, and operator CRDs. This includes Vitastor, Grafana, Prometheus, and VictoriaMetrics evidence without storing Kubernetes credentials in SaaS.
+Agent `v0.1.8` and newer also detect CNI providers from Node metadata and can report best-effort PVC usage through the Kubernetes `nodes/proxy` read path. Core storage inventory remains available when that optional permission is absent.
 
 ## Install
 

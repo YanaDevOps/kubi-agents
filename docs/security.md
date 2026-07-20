@@ -13,3 +13,5 @@ Pairing tokens are one-time and expire after 30 minutes. After registration the 
 The loopback listener on `127.0.0.1:47641` remains for local diagnostics and compatibility. Do not expose it publicly; hosted browser traffic uses the outbound relay.
 
 Installers verify SHA-256 before installation. Release assets include cosign signatures and certificates for independent verification.
+
+PVC usage is optional and read-only. The agent requests kubelet summary data through the Kubernetes API `nodes/proxy` subresource; it never opens kubelet ports directly. If RBAC denies that path, KUBI reports usage as unavailable and continues to show PV, PVC, StorageClass, and CSI inventory.

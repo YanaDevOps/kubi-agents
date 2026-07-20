@@ -12,6 +12,12 @@ describe('agent component detection', () => {
       const pathname = new URL(request.url ?? '/', 'https://localhost').pathname;
       const resources = {
         '/api/v1/namespaces': [],
+        '/api/v1/nodes': [{
+          metadata: {
+            name: 'node-a',
+            annotations: { 'flannel.alpha.coreos.com/backend-type': 'vxlan' }
+          }
+        }],
         '/apis/apps/v1/deployments': [],
         '/apis/apps/v1/daemonsets': [],
         '/apis/apps/v1/statefulsets': [
@@ -48,6 +54,7 @@ describe('agent component detection', () => {
       expect(response.items.find((item) => item.key === 'vitastor')).toMatchObject({ category: 'storage', status: 'detected' });
       expect(response.items.find((item) => item.key === 'grafana')).toMatchObject({ category: 'observability', status: 'detected' });
       expect(response.items.find((item) => item.key === 'victoria-metrics')).toMatchObject({ category: 'observability', status: 'detected' });
+      expect(response.items.find((item) => item.key === 'flannel')).toMatchObject({ category: 'networking', status: 'detected' });
       expect(response.summary.storage).toBe(1);
     } finally {
       agent.destroy();
@@ -55,4 +62,3 @@ describe('agent component detection', () => {
     }
   });
 });
-

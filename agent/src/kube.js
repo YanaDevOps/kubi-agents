@@ -113,6 +113,7 @@ function requestKubeApi(url, requestOptions) {
         body: Buffer.concat(chunks).toString('utf8')
       }));
     });
+    request.setTimeout(Number(requestOptions.timeout) || 10000);
     request.on('timeout', () => request.destroy(new Error('Kubernetes API request timed out.')));
     request.on('error', reject);
     request.end();
@@ -3239,6 +3240,89 @@ function normalizePersistentVolumeClaim(record) {
   };
 }
 
+export function parseNodeSummaryPVCUsage(payload) {
+  const usage = new Map();
+  for (const pod of asRecordArray(asRecord(payload)?.pods)) {
+    const podNamespace = stringOrUndefined(asRecord(pod.podRef)?.namespace) || 'default';
+    const volumes = [...asRecordArray(pod.volume), ...asRecordArray(pod.volumes)];
+    for (const volume of volumes) {
+      const pvcRef = asRecord(volume.pvcRef);
+      const name = stringOrUndefined(pvcRef?.name);
+      const namespace = stringOrUndefined(pvcRef?.namespace) || podNamespace;
+      const usedBytes = Number(volume.usedBytes);
+      if (!name || !Number.isFinite(usedBytes) || usedBytes < 0) continue;
+      const key = `${namespace}/${name}`;
+      usage.set(key, Math.max(usage.get(key) || 0, usedBytes));
+    }
+  }
+  return usage;
+}
+
+async function loadPVCUsage(kubeConfig) {
+  let nodes;
+  try {
+    nodes = await fetchKubeList(kubeConfig, '/api/v1/nodes');
+  } catch (error) {
+    const message = sanitizeKubeError(error);
+    return {
+      usage: new Map(),
+      status: {
+        available: false,
+        partial: false,
+        missingPermissions: message.includes('HTTP 403') ? ['nodes/proxy'] : [],
+        sampledNodes: 0,
+        failedNodes: 0,
+        message: message.includes('HTTP 403')
+          ? 'PVC usage requires read access to the nodes/proxy subresource.'
+          : 'PVC usage could not be sampled from cluster nodes.'
+      }
+    };
+  }
+
+  const nodeNames = asRecordArray(nodes.items).map((node) => metadataFor(node).name).filter(Boolean);
+  const usage = new Map();
+  let sampledNodes = 0;
+  let failedNodes = 0;
+  let permissionDenied = false;
+  for (let offset = 0; offset < nodeNames.length; offset += 4) {
+    const batch = nodeNames.slice(offset, offset + 4);
+    const results = await Promise.allSettled(
+      batch.map((name) => fetchKubeJson(kubeConfig, `/api/v1/nodes/${encodeURIComponent(name)}/proxy/stats/summary`))
+    );
+    results.forEach((result) => {
+      if (result.status === 'rejected') {
+        failedNodes += 1;
+        permissionDenied ||= String(result.reason?.message || result.reason).includes('HTTP 403');
+        return;
+      }
+      sampledNodes += 1;
+      for (const [key, value] of parseNodeSummaryPVCUsage(result.value)) {
+        usage.set(key, Math.max(usage.get(key) || 0, value));
+      }
+    });
+  }
+
+  const available = sampledNodes > 0;
+  const partial = available && failedNodes > 0;
+  return {
+    usage,
+    status: {
+      available,
+      partial,
+      missingPermissions: permissionDenied ? ['nodes/proxy'] : [],
+      sampledNodes,
+      failedNodes,
+      message: available
+        ? partial
+          ? `PVC usage sampled from ${sampledNodes} node(s); ${failedNodes} node(s) were unavailable.`
+          : `PVC usage sampled from ${sampledNodes} node(s).`
+        : permissionDenied
+          ? 'PVC usage requires read access to the nodes/proxy subresource.'
+          : 'PVC usage is not reported by the available node summaries.'
+    }
+  };
+}
+
 function normalizeCSIDriver(record) {
   const meta = metadataFor(record);
   const spec = asRecord(record.spec);
@@ -3378,7 +3462,7 @@ function uniqueEvidence(evidence) {
 
 function componentConfidence(evidence) {
   const score = evidence.reduce(
-    (current, entry) => current + (['deployment', 'statefulset', 'daemonset', 'service', 'storageclass', 'csidriver'].includes(entry.kind) ? 2 : 1),
+    (current, entry) => current + (['node', 'deployment', 'statefulset', 'daemonset', 'service', 'storageclass', 'csidriver'].includes(entry.kind) ? 2 : 1),
     0
   );
   if (score >= 4) return 'high';
@@ -3387,7 +3471,7 @@ function componentConfidence(evidence) {
 }
 
 function componentStatusFor(evidence) {
-  return evidence.some((entry) => ['deployment', 'statefulset', 'daemonset', 'service', 'storageclass', 'csidriver'].includes(entry.kind))
+  return evidence.some((entry) => ['node', 'deployment', 'statefulset', 'daemonset', 'service', 'storageclass', 'csidriver'].includes(entry.kind))
     ? 'detected'
     : 'partial';
 }
@@ -3413,6 +3497,21 @@ function matchNamespaceEvidence(namespaces, ...names) {
     .map(metadataFor)
     .filter((meta) => targets.includes(meta.name.toLowerCase()))
     .map((meta) => ({ kind: 'namespace', name: meta.name }));
+}
+
+function matchNodeEvidence(nodes, needles) {
+  return nodes
+    .filter((record) => {
+      const meta = metadataFor(record);
+      const haystack = [
+        ...Object.keys(meta.labels),
+        ...Object.values(meta.labels),
+        ...Object.keys(meta.annotations),
+        ...Object.values(meta.annotations)
+      ].join(' ').toLowerCase();
+      return needles.some((needle) => haystack.includes(needle));
+    })
+    .map((record) => ({ kind: 'node', name: metadataFor(record).name, detail: 'CNI metadata detected on Node' }));
 }
 
 function matchDeploymentEvidence(deployments, predicate) {
@@ -3625,6 +3724,25 @@ export async function loadLocalStorage(runtimeConfig, namespaceScope = null) {
       new Date().toISOString(),
       requests[3].status === 'fulfilled' ? requests[3].value.truncated : true
     );
+    const pvcUsage = await loadPVCUsage(kubeConfig);
+    const usageObservedAt = new Date().toISOString();
+    persistentVolumeClaims.items = persistentVolumeClaims.items.map((claim) => {
+      const usedBytes = pvcUsage.usage.get(`${claim.namespace}/${claim.name}`);
+      return Number.isFinite(usedBytes)
+        ? { ...claim, usedBytes, usageSource: 'kubelet-summary', usageObservedAt }
+        : claim;
+    });
+    const claimUsageByVolume = new Map(
+      persistentVolumeClaims.items
+        .filter((claim) => claim.volumeName && Number.isFinite(claim.usedBytes))
+        .map((claim) => [claim.volumeName, claim.usedBytes])
+    );
+    persistentVolumes.items = persistentVolumes.items.map((volume) => {
+      const usedBytes = claimUsageByVolume.get(volume.name);
+      return Number.isFinite(usedBytes)
+        ? { ...volume, usedBytes, usageSource: 'kubelet-summary', usageObservedAt }
+        : volume;
+    });
     const providers = buildStorageProviders(storageClasses.items, csiDrivers.items);
 
     return {
@@ -3648,14 +3766,7 @@ export async function loadLocalStorage(runtimeConfig, namespaceScope = null) {
         requestedBytes: persistentVolumeClaims.items.reduce((sum, claim) => sum + parseBytes(claim.requested), 0),
         usedBytes: persistentVolumeClaims.items.reduce((sum, claim) => sum + (Number.isFinite(claim.usedBytes) ? claim.usedBytes : 0), 0)
       },
-      usageStatus: {
-        available: false,
-        partial: false,
-        missingPermissions: [],
-        sampledNodes: 0,
-        failedNodes: 0,
-        message: 'PVC usage metrics are not available through the SaaS agent yet.'
-      },
+      usageStatus: pvcUsage.status,
       providers,
       storageClasses,
       persistentVolumes,
@@ -4417,7 +4528,8 @@ export async function loadLocalComponentInventory(runtimeConfig) {
       fetchKubeList(kubeConfig, '/apis/storage.k8s.io/v1/storageclasses'),
       fetchKubeList(kubeConfig, '/apis/storage.k8s.io/v1/csidrivers'),
       fetchKubeList(kubeConfig, '/apis/networking.k8s.io/v1/ingressclasses'),
-      fetchKubeList(kubeConfig, '/apis/apiextensions.k8s.io/v1/customresourcedefinitions')
+      fetchKubeList(kubeConfig, '/apis/apiextensions.k8s.io/v1/customresourcedefinitions'),
+      fetchKubeList(kubeConfig, '/api/v1/nodes')
     ]);
 
     if (requests.every((entry) => entry.status === 'rejected')) {
@@ -4458,6 +4570,10 @@ export async function loadLocalComponentInventory(runtimeConfig) {
       requests[7].status === 'fulfilled'
         ? asRecordArray(requests[7].value.items)
         : (partial = true, issues.push(partialIssue('components', 'CustomResourceDefinitions could not be loaded for component detection.')), []);
+    const nodes =
+      requests[8].status === 'fulfilled'
+        ? asRecordArray(requests[8].value.items)
+        : (partial = true, issues.push(partialIssue('components', 'Nodes could not be loaded for CNI detection.')), []);
 
     if (requests.some((entry) => entry.status === 'fulfilled' && entry.value.truncated)) {
       partial = true;
@@ -4496,8 +4612,9 @@ export async function loadLocalComponentInventory(runtimeConfig) {
         'Cilium evidence from DaemonSets, Deployments, or cilium.io CRDs.',
         [
           ...matchNamespaceEvidence(namespaces, 'cilium-system'),
-          ...matchDeploymentEvidence(deployments, (meta) => meta.name.includes('cilium')),
-          ...matchDaemonSetEvidence(daemonSets, (meta) => meta.name.includes('cilium')),
+          ...matchDeploymentEvidence(deployments, (_meta, record) => workloadContains(record, ['cilium'])),
+          ...matchDaemonSetEvidence(daemonSets, (_meta, record) => workloadContains(record, ['cilium'])),
+          ...matchNodeEvidence(nodes, ['cilium.io', 'network.cilium.io']),
           ...matchCrdEvidence(crds, (record) => stringOrUndefined(asRecord(record.spec)?.group)?.includes('cilium.io') === true)
         ]
       ),
@@ -4508,8 +4625,9 @@ export async function loadLocalComponentInventory(runtimeConfig) {
         'Calico evidence from workloads or projectcalico.org CRDs.',
         [
           ...matchNamespaceEvidence(namespaces, 'calico-system'),
-          ...matchDeploymentEvidence(deployments, (meta) => meta.name.includes('calico')),
-          ...matchDaemonSetEvidence(daemonSets, (meta) => meta.name.includes('calico')),
+          ...matchDeploymentEvidence(deployments, (_meta, record) => workloadContains(record, ['calico'])),
+          ...matchDaemonSetEvidence(daemonSets, (_meta, record) => workloadContains(record, ['calico'])),
+          ...matchNodeEvidence(nodes, ['projectcalico.org']),
           ...matchCrdEvidence(crds, (record) => stringOrUndefined(asRecord(record.spec)?.group)?.includes('projectcalico.org') === true)
         ]
       ),
@@ -4520,7 +4638,8 @@ export async function loadLocalComponentInventory(runtimeConfig) {
         'Flannel evidence from kube-flannel namespace or DaemonSets.',
         [
           ...matchNamespaceEvidence(namespaces, 'kube-flannel'),
-          ...matchDaemonSetEvidence(daemonSets, (meta) => meta.name.includes('flannel') || meta.namespace === 'kube-flannel')
+          ...matchDaemonSetEvidence(daemonSets, (meta, record) => meta.name.includes('flannel') || meta.namespace === 'kube-flannel' || workloadContains(record, ['flannel'])),
+          ...matchNodeEvidence(nodes, ['flannel.alpha.coreos.com'])
         ]
       ),
       componentSummary(
@@ -4531,7 +4650,8 @@ export async function loadLocalComponentInventory(runtimeConfig) {
         [
           ...matchNamespaceEvidence(namespaces, 'weave'),
           ...matchDeploymentEvidence(deployments, (meta) => meta.name.includes('weave-net') || meta.name.includes('weave')),
-          ...matchDaemonSetEvidence(daemonSets, (meta) => meta.name.includes('weave-net') || meta.name.includes('weave'))
+          ...matchDaemonSetEvidence(daemonSets, (meta) => meta.name.includes('weave-net') || meta.name.includes('weave')),
+          ...matchNodeEvidence(nodes, ['weave.works'])
         ]
       ),
       componentSummary(
@@ -4543,6 +4663,7 @@ export async function loadLocalComponentInventory(runtimeConfig) {
           ...matchNamespaceEvidence(namespaces, 'antrea'),
           ...matchDeploymentEvidence(deployments, (meta) => meta.name.includes('antrea')),
           ...matchDaemonSetEvidence(daemonSets, (meta) => meta.name.includes('antrea')),
+          ...matchNodeEvidence(nodes, ['antrea.io', 'node.antrea.io']),
           ...matchCrdEvidence(crds, (record) => stringOrUndefined(asRecord(record.spec)?.group)?.includes('antrea.io') === true)
         ]
       ),
@@ -4554,9 +4675,45 @@ export async function loadLocalComponentInventory(runtimeConfig) {
         [
           ...matchNamespaceEvidence(namespaces, 'kube-router'),
           ...matchDeploymentEvidence(deployments, (meta) => meta.name.includes('kube-router')),
-          ...matchDaemonSetEvidence(daemonSets, (meta) => meta.name.includes('kube-router'))
+          ...matchDaemonSetEvidence(daemonSets, (meta) => meta.name.includes('kube-router')),
+          ...matchNodeEvidence(nodes, ['kube-router.io'])
         ]
       ),
+      componentSummary('canal', 'Canal', 'networking', 'Canal evidence from controller workloads.', [
+        ...matchDeploymentEvidence(deployments, (_meta, record) => workloadContains(record, ['canal'])),
+        ...matchDaemonSetEvidence(daemonSets, (_meta, record) => workloadContains(record, ['canal']))
+      ]),
+      componentSummary('multus', 'Multus', 'networking', 'Multus evidence from workloads or NetworkAttachmentDefinition CRDs.', [
+        ...matchDeploymentEvidence(deployments, (_meta, record) => workloadContains(record, ['multus'])),
+        ...matchDaemonSetEvidence(daemonSets, (_meta, record) => workloadContains(record, ['multus'])),
+        ...matchCrdEvidence(crds, (record) => stringOrUndefined(asRecord(record.spec)?.group) === 'k8s.cni.cncf.io')
+      ]),
+      componentSummary('kube-ovn', 'Kube-OVN', 'networking', 'Kube-OVN evidence from workloads, Node metadata, or kubeovn.io CRDs.', [
+        ...matchDeploymentEvidence(deployments, (_meta, record) => workloadContains(record, ['kube-ovn', 'kubeovn'])),
+        ...matchDaemonSetEvidence(daemonSets, (_meta, record) => workloadContains(record, ['kube-ovn', 'kubeovn'])),
+        ...matchNodeEvidence(nodes, ['kube-ovn.io', 'kubeovn.io']),
+        ...matchCrdEvidence(crds, (record) => stringOrUndefined(asRecord(record.spec)?.group)?.includes('kubeovn.io') === true)
+      ]),
+      componentSummary('aws-vpc-cni', 'AWS VPC CNI', 'networking', 'AWS VPC CNI evidence from aws-node workloads or ENI Node metadata.', [
+        ...matchDaemonSetEvidence(daemonSets, (_meta, record) => workloadContains(record, ['aws-node', 'amazon-k8s-cni'])),
+        ...matchNodeEvidence(nodes, ['vpc.amazonaws.com', 'k8s.amazonaws.com/eni'])
+      ]),
+      componentSummary('azure-cni', 'Azure CNI', 'networking', 'Azure CNI evidence from networking workloads or pod-network Node metadata.', [
+        ...matchDaemonSetEvidence(daemonSets, (_meta, record) => workloadContains(record, ['azure-cni', 'azure-vnet', 'azure-npm'])),
+        ...matchNodeEvidence(nodes, ['kubernetes.azure.com/podnetwork'])
+      ]),
+      componentSummary('ovn-kubernetes', 'OVN-Kubernetes', 'networking', 'OVN-Kubernetes evidence from ovnkube workloads or Node metadata.', [
+        ...matchDeploymentEvidence(deployments, (_meta, record) => workloadContains(record, ['ovnkube', 'ovn-kubernetes'])),
+        ...matchDaemonSetEvidence(daemonSets, (_meta, record) => workloadContains(record, ['ovnkube', 'ovn-kubernetes'])),
+        ...matchNodeEvidence(nodes, ['k8s.ovn.org'])
+      ]),
+      componentSummary('kindnet', 'kindnet', 'networking', 'kindnet evidence from its DaemonSet.', [
+        ...matchDaemonSetEvidence(daemonSets, (_meta, record) => workloadContains(record, ['kindnet']))
+      ]),
+      componentSummary('gke-dataplane-v2', 'GKE Dataplane V2', 'networking', 'GKE Dataplane V2 evidence from anetd workloads or Node metadata.', [
+        ...matchDaemonSetEvidence(daemonSets, (_meta, record) => workloadContains(record, ['anetd'])),
+        ...matchNodeEvidence(nodes, ['networking.gke.io'])
+      ]),
       componentSummary(
         'kube-proxy',
         'kube-proxy',
