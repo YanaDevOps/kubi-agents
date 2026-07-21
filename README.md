@@ -13,6 +13,8 @@ Agent `v0.1.10` and newer validate kubelet PVC samples against declared volume c
 Agent `v0.1.11` and newer negotiate Pod and Job log responses with Kubernetes API servers that reject a `text/plain`-only Accept header.
 Agent `v0.1.12` and newer expose the latest container restart timestamp so KUBI can distinguish current health from restart history.
 
+Agent `v0.1.13` and newer also expose read-only Job and CronJob execution controls, including TTL, restart policy, active deadlines, completion mode, and Indexed Job failure limits. Older agents remain compatible, but these optional fields are omitted from KUBI drawers.
+
 ## Install
 
 1. Sign in at [app.kubi.live](https://app.kubi.live).

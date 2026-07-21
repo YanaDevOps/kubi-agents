@@ -36,6 +36,10 @@ Update to agent `v0.1.11` or newer, then restart the service. If logs still fail
 
 Update to agent `v0.1.12` or newer, then restart the service. Older agents report the cumulative restart count but do not include the timestamp of the latest terminated container state.
 
+### Job or CronJob execution fields are missing in KUBI
+
+Update to agent `v0.1.13` or newer, then restart the service. Older agents do not report the optional Job template execution controls used by the Job and CronJob detail drawers.
+
 ## PVC Usage Is Unavailable
 
 Agent `v0.1.8` and newer use the Kubernetes API `nodes/proxy` subresource to read kubelet volume summaries. This permission is optional. Without it, requested capacity and storage inventory still work, but used bytes are shown as unavailable. Grant `get` on `nodes/proxy` only when that additional read is acceptable for your cluster policy.

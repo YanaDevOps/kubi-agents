@@ -219,6 +219,10 @@ function numberOrZero(value) {
   return typeof value === 'number' && Number.isFinite(value) ? value : 0;
 }
 
+function numberOrUndefined(value) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
 function parseCpuMilli(value) {
   if (typeof value === 'number' && Number.isFinite(value)) return value * 1000;
   if (typeof value !== 'string' || !value.trim()) return 0;
@@ -1720,6 +1724,7 @@ function buildJobPodRef(pod) {
 function buildRuntimeJob(job, pods) {
   const meta = metadataFor(job);
   const spec = asRecord(job.spec);
+  const podTemplateSpec = asRecord(asRecord(spec?.template)?.spec);
   const status = asRecord(job.status);
   const statusSummary = jobStatusSummary(job);
   const startedAt = stringOrUndefined(status?.startTime) || statusSummary.completedAt || meta.createdAt;
@@ -1739,6 +1744,12 @@ function buildRuntimeJob(job, pods) {
     completions: numberOrZero(spec?.completions) || 1,
     parallelism: numberOrZero(spec?.parallelism) || 1,
     backoffLimit: numberOrZero(spec?.backoffLimit),
+    ttlSecondsAfterFinished: numberOrUndefined(spec?.ttlSecondsAfterFinished),
+    restartPolicy: stringOrUndefined(podTemplateSpec?.restartPolicy),
+    activeDeadlineSeconds: numberOrUndefined(spec?.activeDeadlineSeconds),
+    completionMode: stringOrUndefined(spec?.completionMode),
+    backoffLimitPerIndex: numberOrUndefined(spec?.backoffLimitPerIndex),
+    maxFailedIndexes: numberOrUndefined(spec?.maxFailedIndexes),
     ownerCronJob: ownerName(meta.ownerReferences, 'CronJob'),
     labels: meta.labels,
     annotations: asStringRecord(asRecord(job.metadata)?.annotations),
@@ -1749,6 +1760,8 @@ function buildRuntimeJob(job, pods) {
 function buildRuntimeCronJob(cronJob, jobs) {
   const meta = metadataFor(cronJob);
   const spec = asRecord(cronJob.spec);
+  const jobTemplateSpec = asRecord(asRecord(spec?.jobTemplate)?.spec);
+  const podTemplateSpec = asRecord(asRecord(jobTemplateSpec?.template)?.spec);
   const status = asRecord(cronJob.status);
   const recentJobs = jobs
     .filter((job) => job.ownerCronJob === meta.name && job.namespace === meta.namespace)
@@ -1783,6 +1796,12 @@ function buildRuntimeCronJob(cronJob, jobs) {
     successfulJobsHistoryLimit: numberOrZero(spec?.successfulJobsHistoryLimit),
     failedJobsHistoryLimit: numberOrZero(spec?.failedJobsHistoryLimit),
     startingDeadlineSeconds: numberOrZero(spec?.startingDeadlineSeconds),
+    ttlSecondsAfterFinished: numberOrUndefined(jobTemplateSpec?.ttlSecondsAfterFinished),
+    restartPolicy: stringOrUndefined(podTemplateSpec?.restartPolicy),
+    activeDeadlineSeconds: numberOrUndefined(jobTemplateSpec?.activeDeadlineSeconds),
+    completionMode: stringOrUndefined(jobTemplateSpec?.completionMode),
+    backoffLimitPerIndex: numberOrUndefined(jobTemplateSpec?.backoffLimitPerIndex),
+    maxFailedIndexes: numberOrUndefined(jobTemplateSpec?.maxFailedIndexes),
     lastJobName: lastRun?.name,
     lastJobStatus: lastRun?.status,
     lastJobCompletedAt: lastRun?.completedAt,
