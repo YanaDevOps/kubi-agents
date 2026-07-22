@@ -44,6 +44,10 @@ Update to agent `v0.1.13` or newer, then restart the service. Older agents do no
 
 Agent `v0.1.8` and newer use the Kubernetes API `nodes/proxy` subresource to read kubelet volume summaries. This permission is optional. Without it, requested capacity and storage inventory still work, but used bytes are shown as unavailable. Grant `get` on `nodes/proxy` only when that additional read is acceptable for your cluster policy.
 
+## Certificate Details Are Unavailable
+
+Agent `v0.1.14` and newer read cert-manager Certificate, Order, and Challenge status for Domain Health. If ingress hosts are visible but certificate details are missing, confirm cert-manager is installed and the agent kubeconfig can list `certificates.cert-manager.io`, `orders.acme.cert-manager.io`, and `challenges.acme.cert-manager.io`. TLS Secret contents are not required.
+
 ## Relay Reconnects
 
 The agent keeps heartbeat and runtime relay connectivity separate. Agent `v0.1.5` and newer actively probes the WebSocket and reconnects automatically after a SaaS rollout or transient network failure. A short `relay disconnected; reconnecting` message is expected during recovery; no manual service restart should be required.

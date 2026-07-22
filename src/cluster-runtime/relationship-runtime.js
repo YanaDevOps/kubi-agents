@@ -539,7 +539,7 @@ export function buildTrafficIntentSummary(input) {
 }
 
 const CNI_COMPONENT_KEYS = new Set(['cilium', 'calico', 'flannel', 'weave-net', 'canal', 'antrea', 'kube-router']);
-const VIP_COMPONENT_KEYS = new Set(['kube-vip', 'kube-keepalived-vip', 'keepalived', 'metallb']);
+const VIP_COMPONENT_KEYS = new Set(['kube-vip', 'kube-keepalived-vip', 'keepalived', 'metallb', 'k3s-servicelb']);
 const VIP_IP_PATTERN = /\b\d{1,3}(?:\.\d{1,3}){3}\b/g;
 
 export function buildCniPluginsSummary(input) {

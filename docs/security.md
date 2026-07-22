@@ -15,3 +15,5 @@ The loopback listener on `127.0.0.1:47641` remains for local diagnostics and com
 Installers verify SHA-256 before installation. Release assets include cosign signatures and certificates for independent verification.
 
 PVC usage is optional and read-only. The agent requests kubelet summary data through the Kubernetes API `nodes/proxy` subresource; it never opens kubelet ports directly. If RBAC denies that path, KUBI reports usage as unavailable and continues to show PV, PVC, StorageClass, and CSI inventory.
+
+Domain Health reads cert-manager `certificates`, `orders`, and `challenges` when those APIs are installed and permitted. It exposes status, DNS names, issuer references, expiry, and failure reasons; it does not read TLS Secret values or private keys.

@@ -14,6 +14,7 @@ Agent `v0.1.11` and newer negotiate Pod and Job log responses with Kubernetes AP
 Agent `v0.1.12` and newer expose the latest container restart timestamp so KUBI can distinguish current health from restart history.
 
 Agent `v0.1.13` and newer also expose read-only Job and CronJob execution controls, including TTL, restart policy, active deadlines, completion mode, and Indexed Job failure limits. Older agents remain compatible, but these optional fields are omitted from KUBI drawers.
+Agent `v0.1.14` adds K3s ServiceLB, Vector, and VictoriaLogs detection and exposes read-only cert-manager Certificate, Order, and Challenge status for Domain Health.
 
 ## Install
 

@@ -18,8 +18,14 @@ describe('agent component detection', () => {
             annotations: { 'flannel.alpha.coreos.com/backend-type': 'vxlan' }
           }
         }],
-        '/apis/apps/v1/deployments': [],
-        '/apis/apps/v1/daemonsets': [],
+        '/apis/apps/v1/deployments': [{
+          metadata: { name: 'vector', namespace: 'observability' },
+          spec: { template: { spec: { containers: [{ name: 'vector', image: 'timberio/vector:0.48.0' }] } } }
+        }],
+        '/apis/apps/v1/daemonsets': [{
+          metadata: { name: 'svclb-grafana-abc', namespace: 'kube-system' },
+          spec: { template: { spec: { containers: [{ name: 'lb-port-3000', image: 'rancher/klipper-lb:v0.4.13' }] } } }
+        }],
         '/apis/apps/v1/statefulsets': [
           {
             metadata: { name: 'dashboards', namespace: 'monitoring' },
@@ -28,6 +34,10 @@ describe('agent component detection', () => {
           {
             metadata: { name: 'metrics-store', namespace: 'monitoring' },
             spec: { template: { spec: { containers: [{ name: 'storage', image: 'victoriametrics/vmstorage:v1.121.0' }] } } }
+          },
+          {
+            metadata: { name: 'logs-store', namespace: 'monitoring' },
+            spec: { template: { spec: { containers: [{ name: 'storage', image: 'victoriametrics/victoria-logs:v1.23.3' }] } } }
           }
         ],
         '/apis/storage.k8s.io/v1/storageclasses': [{ metadata: { name: 'fast' }, provisioner: 'csi.vitastor.io' }],
@@ -54,6 +64,9 @@ describe('agent component detection', () => {
       expect(response.items.find((item) => item.key === 'vitastor')).toMatchObject({ category: 'storage', status: 'detected' });
       expect(response.items.find((item) => item.key === 'grafana')).toMatchObject({ category: 'observability', status: 'detected' });
       expect(response.items.find((item) => item.key === 'victoria-metrics')).toMatchObject({ category: 'observability', status: 'detected' });
+      expect(response.items.find((item) => item.key === 'victoria-logs')).toMatchObject({ category: 'observability', status: 'detected' });
+      expect(response.items.find((item) => item.key === 'vector')).toMatchObject({ category: 'observability', status: 'detected' });
+      expect(response.items.find((item) => item.key === 'k3s-servicelb')).toMatchObject({ category: 'networking', status: 'detected' });
       expect(response.items.find((item) => item.key === 'flannel')).toMatchObject({ category: 'networking', status: 'detected' });
       expect(response.summary.storage).toBe(1);
     } finally {

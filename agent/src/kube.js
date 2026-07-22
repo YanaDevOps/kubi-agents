@@ -1595,6 +1595,10 @@ function buildRuntimePodList(podItems, fetchedAt, namespaceScope, issues = [], p
   };
 }
 
+/**
+ * @param {any} runtimeConfig
+ * @param {string | null} [namespaceScope]
+ */
 export async function loadLocalPods(runtimeConfig, namespaceScope = null) {
   try {
     const kubeConfig = loadLocalKubeConfig(runtimeConfig);
@@ -1833,6 +1837,10 @@ function buildRuntimeJobsInventory(jobsRaw, cronJobsRaw, podsRaw, fetchedAt, nam
   };
 }
 
+/**
+ * @param {any} runtimeConfig
+ * @param {string | null} [namespaceScope]
+ */
 export async function loadLocalJobs(runtimeConfig, namespaceScope = null) {
   try {
     const kubeConfig = loadLocalKubeConfig(runtimeConfig);
@@ -4838,6 +4846,13 @@ export async function loadLocalComponentInventory(runtimeConfig) {
         ]
       ),
       componentSummary(
+        'k3s-servicelb',
+        'K3s ServiceLB',
+        'networking',
+        'K3s ServiceLB evidence from svclb DaemonSets.',
+        [...matchDaemonSetEvidence(daemonSets, (meta) => meta.name.startsWith('svclb-'))]
+      ),
+      componentSummary(
         'metallb',
         'MetalLB',
         'networking',
@@ -4893,6 +4908,32 @@ export async function loadLocalComponentInventory(runtimeConfig) {
           ),
           ...matchDaemonSetEvidence(daemonSets, (_meta, record) => workloadContains(record, ['victoriametrics', 'victoria-metrics', 'vmagent'])),
           ...matchCrdEvidence(crds, (record) => stringOrUndefined(asRecord(record.spec)?.group)?.includes('victoriametrics.com') === true)
+        ]
+      ),
+      componentSummary(
+        'victoria-logs',
+        'VictoriaLogs',
+        'observability',
+        'VictoriaLogs evidence from workloads or VictoriaLogs operator CRDs.',
+        [
+          ...matchDeploymentEvidence(deployments, (_meta, record) => workloadContains(record, ['victorialogs', 'victoria-logs', 'vlogs', 'vlinsert', 'vlselect', 'vlstorage'])),
+          ...matchStatefulSetEvidence(statefulSets, (record) => workloadContains(record, ['victorialogs', 'victoria-logs', 'vlogs', 'vlinsert', 'vlselect', 'vlstorage'])),
+          ...matchDaemonSetEvidence(daemonSets, (_meta, record) => workloadContains(record, ['victorialogs', 'victoria-logs', 'vlogs'])),
+          ...matchCrdEvidence(crds, (record) => {
+            const kind = stringOrUndefined(asRecord(asRecord(record.spec)?.names)?.kind)?.toLowerCase() || '';
+            return kind.startsWith('vl') && stringOrUndefined(asRecord(record.spec)?.group)?.includes('victoriametrics.com') === true;
+          })
+        ]
+      ),
+      componentSummary(
+        'vector',
+        'Vector',
+        'observability',
+        'Vector evidence from dedicated workloads or timberio/vector images.',
+        [
+          ...matchDeploymentEvidence(deployments, (meta, record) => meta.name === 'vector' || meta.name.startsWith('vector-') || workloadContains(record, ['timberio/vector'])),
+          ...matchStatefulSetEvidence(statefulSets, (record) => workloadContains(record, ['timberio/vector'])),
+          ...matchDaemonSetEvidence(daemonSets, (meta, record) => meta.name === 'vector' || meta.name.startsWith('vector-') || workloadContains(record, ['timberio/vector']))
         ]
       ),
       componentSummary(
@@ -4992,6 +5033,75 @@ export async function loadLocalComponentInventory(runtimeConfig) {
   }
 }
 
+function normalizeLocalCertificates(records) {
+  return asRecordArray(records).map((record) => {
+    const meta = metadataFor(record);
+    const spec = asRecord(record.spec);
+    const status = asRecord(record.status);
+    const issuerRef = asRecord(spec?.issuerRef);
+    const conditions = asRecordArray(status?.conditions).map((condition) => ({
+      type: stringOrUndefined(condition.type) || 'Unknown',
+      status: stringOrUndefined(condition.status) || 'Unknown',
+      reason: stringOrUndefined(condition.reason),
+      message: stringOrUndefined(condition.message),
+      lastTransitionTime: stringOrUndefined(condition.lastTransitionTime)
+    }));
+    const ready = conditions.find((condition) => condition.type.toLowerCase() === 'ready');
+    return {
+      namespace: meta.namespace,
+      name: meta.name,
+      dnsNames: stringList(spec?.dnsNames),
+      ready: ready?.status || 'Unknown',
+      issuer: stringOrUndefined(issuerRef?.name),
+      secretName: stringOrUndefined(spec?.secretName),
+      notAfter: stringOrUndefined(status?.notAfter),
+      reason: ready?.reason,
+      message: ready?.message,
+      conditions
+    };
+  });
+}
+
+function normalizeLocalOrders(records) {
+  return asRecordArray(records).map((record) => {
+    const meta = metadataFor(record);
+    const metadata = asRecord(record.metadata);
+    const annotations = asStringRecord(metadata?.annotations);
+    const spec = asRecord(record.spec);
+    const status = asRecord(record.status);
+    return {
+      namespace: meta.namespace,
+      name: meta.name,
+      certificateName: annotations['cert-manager.io/certificate-name'],
+      state: stringOrUndefined(status?.state) || 'unknown',
+      reason: stringOrUndefined(status?.reason),
+      dnsNames: [...new Set([
+        ...stringList(spec?.dnsNames),
+        ...asRecordArray(status?.authorizations).map((item) => stringOrUndefined(item.identifier)).filter(Boolean)
+      ])]
+    };
+  });
+}
+
+function normalizeLocalChallenges(records) {
+  return asRecordArray(records).map((record) => {
+    const meta = metadataFor(record);
+    const metadata = asRecord(record.metadata);
+    const owner = asRecordArray(metadata?.ownerReferences).find((item) => stringOrUndefined(item.kind) === 'Order');
+    const spec = asRecord(record.spec);
+    const status = asRecord(record.status);
+    return {
+      namespace: meta.namespace,
+      name: meta.name,
+      orderName: stringOrUndefined(owner?.name),
+      state: stringOrUndefined(status?.state) || 'unknown',
+      reason: stringOrUndefined(status?.reason),
+      dnsName: stringOrUndefined(spec?.dnsName),
+      type: stringOrUndefined(spec?.type)
+    };
+  });
+}
+
 export async function loadLocalDomainHealth(runtimeConfig, namespaceScope = null) {
   try {
     const kubeConfig = loadLocalKubeConfig(runtimeConfig);
@@ -5001,10 +5111,13 @@ export async function loadLocalDomainHealth(runtimeConfig, namespaceScope = null
         kubeConfig,
         namespacePath('/apis/networking.k8s.io/v1/ingresses', '/apis/networking.k8s.io/v1/namespaces/:namespace/ingresses', effectiveNamespace)
       ),
-      loadLocalServices(runtimeConfig, effectiveNamespace)
+      loadLocalServices(runtimeConfig, effectiveNamespace),
+      fetchKubeList(kubeConfig, namespacePath('/apis/cert-manager.io/v1/certificates', '/apis/cert-manager.io/v1/namespaces/:namespace/certificates', effectiveNamespace)),
+      fetchKubeList(kubeConfig, namespacePath('/apis/acme.cert-manager.io/v1/orders', '/apis/acme.cert-manager.io/v1/namespaces/:namespace/orders', effectiveNamespace)),
+      fetchKubeList(kubeConfig, namespacePath('/apis/acme.cert-manager.io/v1/challenges', '/apis/acme.cert-manager.io/v1/namespaces/:namespace/challenges', effectiveNamespace))
     ]);
 
-    if (requests.every((entry) => entry.status === 'rejected')) {
+    if (requests.slice(0, 2).every((entry) => entry.status === 'rejected')) {
       throw requests[0].reason;
     }
 
@@ -5018,6 +5131,17 @@ export async function loadLocalDomainHealth(runtimeConfig, namespaceScope = null
       requests[1].status === 'fulfilled'
         ? requests[1].value
         : (partial = true, issues.push(partialIssue('domain-health', 'Services could not be loaded for domain health.')), null);
+    const certManagerAvailable = requests.slice(2).some((entry) => entry.status === 'fulfilled');
+    const certManagerDenied = !certManagerAvailable && requests.slice(2).some((entry) =>
+      entry.status === 'rejected' && !/404|not found/i.test(String(entry.reason?.message || entry.reason))
+    );
+    if (certManagerDenied) {
+      partial = true;
+      issues.push(partialIssue('domain-health', 'cert-manager resources could not be loaded.'));
+    }
+    const certificates = requests[2].status === 'fulfilled' ? normalizeLocalCertificates(requests[2].value.items) : [];
+    const orders = requests[3].status === 'fulfilled' ? normalizeLocalOrders(requests[3].value.items) : [];
+    const challenges = requests[4].status === 'fulfilled' ? normalizeLocalChallenges(requests[4].value.items) : [];
 
     if (requests[0].status === 'fulfilled' && requests[0].value.truncated) {
       partial = true;
@@ -5119,6 +5243,38 @@ export async function loadLocalDomainHealth(runtimeConfig, namespaceScope = null
       });
     }
 
+    const fetchedAt = new Date().toISOString();
+    for (const certificate of certificates) {
+      const ready = certificate.ready.toLowerCase() === 'true';
+      const expired = certificate.notAfter ? Date.parse(certificate.notAfter) <= Date.parse(fetchedAt) : false;
+      if (ready && !expired) continue;
+      const reason = certificate.reason || (expired ? 'Expired' : 'Not Ready');
+      const critical = expired || /expired|failed|revoked|denied/i.test(reason);
+      const linkedHosts = [...hostMap.values()].filter((host) =>
+        certificate.dnsNames.includes(host.host) ||
+        (host.owners.some((owner) => owner.namespace === certificate.namespace) &&
+          certificate.secretName && host.tlsSecretNames.includes(certificate.secretName))
+      );
+      const affectedHosts = linkedHosts.length > 0 ? linkedHosts.map((host) => host.host) : certificate.dnsNames;
+      for (const host of affectedHosts.length > 0 ? affectedHosts : [undefined]) {
+        const issueId = `domain.certificate.${certificate.namespace}.${certificate.name}.${host || 'unlinked'}`;
+        issueMap.set(issueId, {
+          id: issueId,
+          severity: critical ? 'critical' : 'warning',
+          title: expired ? 'Certificate expired' : 'Certificate is not ready',
+          message: certificate.message || `${certificate.namespace}/${certificate.name} reports ${reason}.`,
+          ...(host ? { host } : {}),
+          nextStep: 'Review the Certificate, Order, and Challenge status in cert-manager.',
+          objectRefs: [{ kind: 'Certificate', namespace: certificate.namespace, name: certificate.name }]
+        });
+        const hostSummary = host ? hostMap.get(host) : null;
+        if (hostSummary && !hostSummary.issueIds.includes(issueId)) {
+          hostSummary.issueIds.push(issueId);
+          hostSummary.status = critical ? 'critical' : hostSummary.status === 'critical' ? 'critical' : 'warning';
+        }
+      }
+    }
+
     const hosts = [...hostMap.values()].sort((left, right) => left.host.localeCompare(right.host));
     const issuesList = [...issueMap.values()].sort((left, right) => validationSeverityRank(left.severity) - validationSeverityRank(right.severity));
 
@@ -5137,7 +5293,12 @@ export async function loadLocalDomainHealth(runtimeConfig, namespaceScope = null
       },
       ingresses: buildResourceList(ingresses, new Date().toISOString(), requests[0].status === 'fulfilled' ? requests[0].value.truncated : true),
       hosts: buildResourceList(hosts, new Date().toISOString(), requests[0].status === 'fulfilled' ? requests[0].value.truncated : true),
-      issuesList: buildResourceList(issuesList, new Date().toISOString(), requests[0].status === 'fulfilled' ? requests[0].value.truncated : true)
+      issuesList: buildResourceList(issuesList, new Date().toISOString(), requests[0].status === 'fulfilled' ? requests[0].value.truncated : true),
+      certManagerAvailable,
+      certManagerMessage: certManagerDenied ? 'cert-manager is installed, but its resources are not readable with the current credentials.' : undefined,
+      certificates: buildResourceList(certificates, fetchedAt, requests[2].status === 'fulfilled' ? requests[2].value.truncated : certManagerDenied),
+      orders: buildResourceList(orders, fetchedAt, requests[3].status === 'fulfilled' ? requests[3].value.truncated : certManagerDenied),
+      challenges: buildResourceList(challenges, fetchedAt, requests[4].status === 'fulfilled' ? requests[4].value.truncated : certManagerDenied)
     };
   } catch (error) {
     throw new Error(sanitizeKubeError(error));
