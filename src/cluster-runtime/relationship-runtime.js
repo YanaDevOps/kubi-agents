@@ -1326,6 +1326,21 @@ export function buildPortsValidationItems(ports) {
       );
     }
 
+    if (row.endpointStatus === 'partial') {
+      items.push(
+        validationItem(
+          `networking.service_partial_endpoints.${row.namespace}.${row.service}.${row.port}`,
+          'networking',
+          'warning',
+          'Service endpoints are partially ready',
+          `${row.namespace}/${row.service} has ${row.readyEndpoints}/${row.totalEndpoints} ready endpoints for port ${row.port}.`,
+          'Inspect the Not Ready pods and their readiness probes before capacity degrades further.',
+          [{ kind: 'Service', namespace: row.namespace, name: row.service }],
+          [`Port ${row.port}/${row.protocol}`, ...row.endpointPods]
+        )
+      );
+    }
+
     if (row.targetStatus === 'unresolved-target-port') {
       items.push(
         validationItem(

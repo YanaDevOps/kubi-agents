@@ -17,6 +17,9 @@ Installers verify SHA-256 before installation. Release assets include cosign sig
 PVC usage is optional and read-only. The agent requests kubelet summary data through the Kubernetes API `nodes/proxy` subresource; it never opens kubelet ports directly. If RBAC denies that path, KUBI reports usage as unavailable and continues to show PV, PVC, StorageClass, and CSI inventory.
 
 Domain Health reads cert-manager `certificates`, `orders`, and `challenges` when those APIs are installed and permitted. It exposes status, DNS names, issuer references, expiry, and failure reasons; it does not read TLS Secret values or private keys.
+
+Gateway API validation reads only installed Gateway API custom resources, Service summaries, and endpoint readiness already available through the selected kubeconfig. It does not mutate routes, call backend workloads, or execute server-side authorization probes.
+
 ## Backup Discovery
 
 Backup activity is read from Kubernetes custom-resource metadata through the same selected kubeconfig and read-only runtime boundary. The agent does not call vendor cloud APIs, read Kubernetes Secret values, persist raw custom resources in SaaS, or create/restore/delete backup resources.

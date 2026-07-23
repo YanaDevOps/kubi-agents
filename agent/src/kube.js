@@ -12,6 +12,10 @@ import {
   BACKUP_RESOURCE_DEFINITIONS,
   buildUniversalBackupActivitySummary
 } from '../../src/shared/backup-activity.js';
+import {
+  buildGatewayApiValidationItems,
+  gatewayApiDefinitionsFromCrds
+} from '../../src/shared/gateway-api-validation.js';
 import { deriveRuntimeTargetKey } from '../../src/shared/runtime-target.js';
 import {
   buildPortsTruthSummary,
@@ -5333,7 +5337,8 @@ export async function loadLocalValidation(runtimeConfig, namespaceScope = null) 
       loadLocalComponentInventory(runtimeConfig),
       loadLocalDomainHealth(runtimeConfig, effectiveNamespace),
       loadLocalRbac(runtimeConfig, effectiveNamespace),
-      loadLocalPorts(runtimeConfig, effectiveNamespace)
+      loadLocalPorts(runtimeConfig, effectiveNamespace),
+      loadLocalGatewayApiValidationData(runtimeConfig, effectiveNamespace)
     ]);
 
     if (requests.every((entry) => entry.status === 'rejected')) {
@@ -5373,6 +5378,10 @@ export async function loadLocalValidation(runtimeConfig, namespaceScope = null) 
       requests[7].status === 'fulfilled'
         ? requests[7].value
         : (issues.push(partialIssue('validation', 'Ports validation inputs could not be loaded.')), null);
+    const gatewayApi =
+      requests[8].status === 'fulfilled'
+        ? requests[8].value
+        : (issues.push(partialIssue('validation', 'Gateway API validation inputs could not be loaded.')), null);
 
     const items = [];
 
@@ -5533,6 +5542,15 @@ export async function loadLocalValidation(runtimeConfig, namespaceScope = null) 
 
     items.push(...(rbac ? buildRbacValidationItems(rbac) : []));
     items.push(...(ports ? buildPortsValidationItems(ports) : []));
+    items.push(...(gatewayApi
+      ? buildGatewayApiValidationItems({
+          ...gatewayApi,
+          namespaceScope: effectiveNamespace,
+          services: services?.items || [],
+          servicesPartial: services?.partial === true,
+          portRows: ports?.services?.items || []
+        })
+      : []));
 
     const deduped = [...new Map(items.map((item) => [item.id, item])).values()].sort((left, right) => {
       const severity = validationSeverityRank(left.severity) - validationSeverityRank(right.severity);
@@ -5545,7 +5563,7 @@ export async function loadLocalValidation(runtimeConfig, namespaceScope = null) 
       return left.title.localeCompare(right.title);
     });
 
-    const partial = [nodes, workloads, services, storage, components, domainHealth, rbac, ports].some((entry) => entry?.partial === true);
+    const partial = [nodes, workloads, services, storage, components, domainHealth, rbac, ports, gatewayApi].some((entry) => entry?.partial === true);
 
     return {
       namespaceScope: effectiveNamespace,
@@ -5574,4 +5592,50 @@ export async function loadLocalValidation(runtimeConfig, namespaceScope = null) 
   } catch (error) {
     throw new Error(sanitizeKubeError(error));
   }
+}
+
+async function loadLocalGatewayApiValidationData(runtimeConfig, namespaceScope = null) {
+  const kubeConfig = loadLocalKubeConfig(runtimeConfig);
+  const crds = await fetchKubeList(kubeConfig, '/apis/apiextensions.k8s.io/v1/customresourcedefinitions');
+  const definitions = gatewayApiDefinitionsFromCrds(crds.items);
+  const requests = await Promise.allSettled(
+    definitions.map((definition) =>
+      fetchKubeList(kubeConfig, gatewayApiResourcePath(definition, namespaceScope), true)
+    )
+  );
+  const resources = {
+    gatewayClasses: [],
+    gateways: [],
+    routes: [],
+    referenceGrants: []
+  };
+  let partial = crds.truncated;
+
+  requests.forEach((result, index) => {
+    const definition = definitions[index];
+    if (!definition) return;
+    if (result.status === 'rejected') {
+      partial = true;
+      return;
+    }
+    partial = partial || result.value.truncated;
+    if (definition.kind === 'GatewayClass') resources.gatewayClasses.push(...result.value.items);
+    else if (definition.kind === 'Gateway') resources.gateways.push(...result.value.items);
+    else if (definition.kind === 'ReferenceGrant') resources.referenceGrants.push(...result.value.items);
+    else resources.routes.push(...result.value.items);
+  });
+
+  return {
+    ...resources,
+    partial,
+    referenceGrantsPartial: partial || Boolean(namespaceScope && namespaceScope !== 'all')
+  };
+}
+
+function gatewayApiResourcePath(definition, namespaceScope = null) {
+  const base = `/apis/${encodeURIComponent(definition.group)}/${encodeURIComponent(definition.version)}`;
+  if (definition.scope === 'Namespaced' && namespaceScope && namespaceScope !== 'all') {
+    return `${base}/namespaces/${encodeURIComponent(namespaceScope)}/${encodeURIComponent(definition.plural)}`;
+  }
+  return `${base}/${encodeURIComponent(definition.plural)}`;
 }
