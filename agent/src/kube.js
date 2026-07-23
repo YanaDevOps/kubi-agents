@@ -5454,20 +5454,22 @@ export async function loadLocalValidation(runtimeConfig, namespaceScope = null) 
       }
     }
 
-    for (const service of services?.items || []) {
-      if (service.endpointAvailability.status === 'missing' && Object.keys(service.selector).length > 0) {
-        items.push(
-          validationItem(
-            `networking.service_no_endpoints.${service.namespace}.${service.name}`,
-            'networking',
-            'warning',
-            'Service has no ready endpoints',
-            `${service.namespace}/${service.name} does not currently have any ready endpoints.`,
-            'Verify Service selectors, backing pods, and EndpointSlices for this Service.',
-            [{ kind: 'Service', namespace: service.namespace, name: service.name }],
-            Object.entries(service.selector).map(([key, value]) => `${key}=${value}`)
-          )
-        );
+    if (!ports) {
+      for (const service of services?.items || []) {
+        if (service.endpointAvailability.status === 'missing' && Object.keys(service.selector).length > 0) {
+          items.push(
+            validationItem(
+              `networking.service_no_endpoints.${service.namespace}.${service.name}`,
+              'networking',
+              'warning',
+              'Service has no ready endpoints',
+              `${service.namespace}/${service.name} does not currently have any ready endpoints.`,
+              'Verify Service selectors, backing pods, and EndpointSlices for this Service.',
+              [{ kind: 'Service', namespace: service.namespace, name: service.name }],
+              Object.entries(service.selector).map(([key, value]) => `${key}=${value}`)
+            )
+          );
+        }
       }
     }
 

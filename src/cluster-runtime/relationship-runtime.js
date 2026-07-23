@@ -720,6 +720,26 @@ function endpointDataByService(endpointSlices) {
   return map;
 }
 
+function resolvedEndpointPort(endpoints, servicePort) {
+  const servicePortName = stringOrUndefined(servicePort.name);
+  const protocol = stringOrUndefined(servicePort.protocol) || 'TCP';
+
+  for (const slice of endpoints.slices) {
+    const slicePorts = asRecordArray(slice.ports).filter(
+      (port) => (stringOrUndefined(port.protocol) || 'TCP') === protocol
+    );
+    const match = servicePortName
+      ? slicePorts.find((port) => stringOrUndefined(port.name) === servicePortName)
+      : slicePorts.length === 1
+        ? slicePorts[0]
+        : undefined;
+    const portNumber = numberOrUndefined(match?.port);
+    if (portNumber) return portNumber;
+  }
+
+  return undefined;
+}
+
 function ingressRoutes(ingresses, serviceMap, endpointMap) {
   const rows = [];
 
@@ -856,6 +876,7 @@ function buildPortsTruthRows(services, endpointSlices, pods, ingresses, namespac
       if (!portNumber) continue;
 
       const target = parsePortValue(port.targetPort, portNumber);
+      const endpointTargetPort = resolvedEndpointPort(endpoints, port);
       const containerMatches = containerPorts.filter((containerPort) => {
         if (containerPort.namespace !== meta.namespace) return false;
         if (!matchingPods.some((pod) => metadataFor(pod).name === containerPort.pod)) return false;
@@ -866,6 +887,7 @@ function buildPortsTruthRows(services, endpointSlices, pods, ingresses, namespac
       });
       const resolvedTargetPort =
         target.resolvedTargetPort ||
+        endpointTargetPort ||
         (target.matchByName && containerMatches.length > 0 ? containerMatches[0].port : undefined);
 
       const serviceType = stringOrUndefined(spec?.type) || 'ClusterIP';
@@ -889,9 +911,9 @@ function buildPortsTruthRows(services, endpointSlices, pods, ingresses, namespac
       } else if (endpoints.readyAddresses === 0) {
         targetStatus = 'missing-endpoints';
         issues.push('Service has no ready endpoints.');
-      } else if (!resolvedTargetPort || containerMatches.length === 0) {
+      } else if (target.matchByName && !resolvedTargetPort) {
         targetStatus = 'unresolved-target-port';
-        issues.push('TargetPort does not resolve to any selected container port.');
+        issues.push('Named targetPort does not resolve through EndpointSlices or selected container ports.');
       }
 
       rows.push({
@@ -912,7 +934,7 @@ function buildPortsTruthRows(services, endpointSlices, pods, ingresses, namespac
         readyEndpoints: endpoints.readyAddresses,
         totalEndpoints: endpoints.addresses,
         endpointStatus:
-          endpoints.addresses === 0
+          endpoints.readyAddresses === 0
             ? 'missing'
             : endpoints.readyAddresses < endpoints.addresses
               ? 'partial'
@@ -1294,8 +1316,9 @@ export function buildRbacValidationItems(rbac) {
 
 export function buildPortsValidationItems(ports) {
   const items = [];
+  const serviceRows = ports.services?.items || [];
 
-  for (const row of ports.services?.items || []) {
+  for (const row of serviceRows) {
     if (row.targetStatus === 'selector-mismatch') {
       items.push(
         validationItem(
@@ -1307,36 +1330,6 @@ export function buildPortsValidationItems(ports) {
           'Verify Service selectors, namespace scope, and workload labels.',
           [{ kind: 'Service', namespace: row.namespace, name: row.service }],
           Object.entries(row.selector).map(([key, value]) => `${key}=${value}`)
-        )
-      );
-    }
-
-    if (row.targetStatus === 'missing-endpoints') {
-      items.push(
-        validationItem(
-          `networking.service_no_endpoints.${row.id}`,
-          'networking',
-          row.exposure === 'internal' ? 'warning' : 'critical',
-          'Service has no ready endpoints',
-          `${row.namespace}/${row.service} has no ready endpoints for port ${row.port}.`,
-          'Check pod readiness, EndpointSlices, and workload rollout state.',
-          [{ kind: 'Service', namespace: row.namespace, name: row.service }],
-          row.endpointPods
-        )
-      );
-    }
-
-    if (row.endpointStatus === 'partial') {
-      items.push(
-        validationItem(
-          `networking.service_partial_endpoints.${row.namespace}.${row.service}.${row.port}`,
-          'networking',
-          'warning',
-          'Service endpoints are partially ready',
-          `${row.namespace}/${row.service} has ${row.readyEndpoints}/${row.totalEndpoints} ready endpoints for port ${row.port}.`,
-          'Inspect the Not Ready pods and their readiness probes before capacity degrades further.',
-          [{ kind: 'Service', namespace: row.namespace, name: row.service }],
-          [`Port ${row.port}/${row.protocol}`, ...row.endpointPods]
         )
       );
     }
@@ -1356,20 +1349,46 @@ export function buildPortsValidationItems(ports) {
       );
     }
 
-    if (row.exposure !== 'internal' && row.endpointStatus !== 'ready') {
-      items.push(
-        validationItem(
-          `networking.exposed_broken_route.${row.id}`,
-          'networking',
-          'critical',
-          'Externally exposed service route is not healthy',
-          `${row.namespace}/${row.service} is exposed via ${row.exposure}, but the backing route for port ${row.port} is not healthy.`,
-          'Check Service type, ingress/backend mapping, and endpoint readiness before relying on this exposed path.',
-          [{ kind: 'Service', namespace: row.namespace, name: row.service }],
-          row.issues
-        )
-      );
-    }
+  }
+
+  const rowsByService = new Map();
+  for (const row of serviceRows) {
+    const key = `${row.namespace}/${row.service}`;
+    const current = rowsByService.get(key) || [];
+    current.push(row);
+    rowsByService.set(key, current);
+  }
+
+  for (const rows of rowsByService.values()) {
+    const first = rows[0];
+    if (!first) continue;
+    const unavailable = rows.some((row) => row.endpointStatus === 'missing' || Number(row.readyEndpoints || 0) === 0);
+    const partial = !unavailable && rows.some((row) => row.endpointStatus === 'partial');
+    if (!unavailable && !partial) continue;
+
+    const readyEndpoints = Math.min(...rows.map((row) => Number(row.readyEndpoints || 0)));
+    const totalEndpoints = Math.max(...rows.map((row) => Number(row.totalEndpoints || 0)));
+    const evidence = [
+      ...rows.map((row) => `Port ${row.port}/${row.protocol}`),
+      ...rows.flatMap((row) => row.endpointPods || [])
+    ].filter((value, index, values) => values.indexOf(value) === index);
+
+    items.push(
+      validationItem(
+        unavailable
+          ? `networking.service_no_endpoints.${first.namespace}.${first.service}`
+          : `networking.service_partial_endpoints.${first.namespace}.${first.service}`,
+        'networking',
+        'warning',
+        unavailable ? 'Service has no ready endpoints' : 'Service endpoints are partially ready',
+        `${first.namespace}/${first.service} has ${readyEndpoints}/${totalEndpoints} ready endpoints.`,
+        unavailable
+          ? 'Check pod readiness, EndpointSlices, and workload rollout state.'
+          : 'Inspect the Not Ready pods and their readiness probes before capacity degrades further.',
+        [{ kind: 'Service', namespace: first.namespace, name: first.service }],
+        evidence
+      )
+    );
   }
 
   for (const route of ports.ingresses?.items || []) {
