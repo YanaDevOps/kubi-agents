@@ -15,6 +15,7 @@ Agent `v0.1.12` and newer expose the latest container restart timestamp so KUBI 
 
 Agent `v0.1.13` and newer also expose read-only Job and CronJob execution controls, including TTL, restart policy, active deadlines, completion mode, and Indexed Job failure limits. Older agents remain compatible, but these optional fields are omitted from KUBI drawers.
 Agent `v0.1.14` adds K3s ServiceLB, Vector, and VictoriaLogs detection and exposes read-only cert-manager Certificate, Order, and Challenge status for Domain Health.
+Agent `v0.1.15` adds provider-neutral backup discovery for Velero/OpenShift OADP, CSI VolumeSnapshots, Longhorn, Veeam Kasten K10, Trilio, Rancher Backup Operator, K3s/RKE2 etcd snapshots, and Portworx/Stork. It reads Kubernetes custom resources only; it does not call vendor APIs or read Secret values. CSI and etcd recovery points are reported as snapshots, not full backups.
 
 ## Install
 

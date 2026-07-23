@@ -8,6 +8,10 @@ import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { parse as parseYaml } from 'yaml';
 import { detectProviderMetadata } from '../../src/shared/provider-detection.js';
+import {
+  BACKUP_RESOURCE_DEFINITIONS,
+  buildUniversalBackupActivitySummary
+} from '../../src/shared/backup-activity.js';
 import { deriveRuntimeTargetKey } from '../../src/shared/runtime-target.js';
 import {
   buildPortsTruthSummary,
@@ -174,7 +178,7 @@ export async function fetchKubeList(kubeConfig, path, allowMissing = false) {
       payload = await fetchKubeJson(kubeConfig, `${pathname}?${search.toString()}`);
     } catch (error) {
       if (allowMissing && error instanceof Error && /HTTP 404/.test(error.message)) {
-        return { items, truncated: false };
+        return { items, truncated: false, missing: true };
       }
       throw error;
     }
@@ -4090,27 +4094,40 @@ export async function loadLocalBackupActivity(runtimeConfig, namespaceScope = nu
   try {
     const kubeConfig = loadLocalKubeConfig(runtimeConfig);
     const effectiveNamespace = namespaceScope || runtimeConfig.namespace || null;
-    const requests = await Promise.allSettled([
-      fetchKubeList(kubeConfig, namespacePath('/apis/velero.io/v1/backups', '/apis/velero.io/v1/namespaces/:namespace/backups', effectiveNamespace)),
-      fetchKubeList(kubeConfig, namespacePath('/apis/velero.io/v1/restores', '/apis/velero.io/v1/namespaces/:namespace/restores', effectiveNamespace)),
-      fetchKubeList(kubeConfig, namespacePath('/apis/velero.io/v1/schedules', '/apis/velero.io/v1/namespaces/:namespace/schedules', effectiveNamespace))
-    ]);
-    const issues = [];
-    const backups = settledSection(requests[0], 'backup-activity', 'Velero Backups could not be loaded.', 'The Backup list was truncated for this runtime read.', issues);
-    const restores = settledSection(requests[1], 'backup-activity', 'Velero Restores could not be loaded.', 'The Restore list was truncated for this runtime read.', issues);
-    const schedules = settledSection(requests[2], 'backup-activity', 'Velero Schedules could not be loaded.', 'The Schedule list was truncated for this runtime read.', issues);
-    const detected = requests.some((request) => request.status === 'fulfilled');
-    return buildRuntimeBackupActivity(
-      backups.items,
-      restores.items,
-      schedules.items,
-      new Date().toISOString(),
-      effectiveNamespace,
-      detected,
-      detected ? undefined : 'Velero backup resources were not detected or are not readable through this runtime path.',
-      issues,
-      backups.partial || restores.partial || schedules.partial
-    );
+    const backupPath = (definition, version) => {
+      const base = `/apis/${definition.group}/${version}`;
+      return definition.namespaced && effectiveNamespace
+        ? `${base}/namespaces/${encodeURIComponent(effectiveNamespace)}/${definition.resource}`
+        : `${base}/${definition.resource}`;
+    };
+    const resources = await Promise.all(BACKUP_RESOURCE_DEFINITIONS.map(async (definition) => {
+      for (const version of definition.versions) {
+        try {
+          const response = await fetchKubeList(kubeConfig, backupPath(definition, version), true);
+          if (response.missing) continue;
+          return {
+            definition,
+            items: response.items,
+            available: true,
+            partial: response.truncated,
+            version
+          };
+        } catch (error) {
+          if (error instanceof Error && /HTTP 403/.test(error.message)) {
+            return { definition, items: [], available: false, denied: true, partial: true, version };
+          }
+          return { definition, items: [], available: false, partial: true, version };
+        }
+      }
+      return { definition, items: [], available: false, partial: false };
+    }));
+    return buildUniversalBackupActivitySummary({
+      resources,
+      fetchedAt: new Date().toISOString(),
+      namespaceScope: effectiveNamespace,
+      issues: [],
+      partial: resources.some((resource) => resource.partial)
+    });
   } catch (error) {
     throw new Error(sanitizeKubeError(error));
   }
