@@ -62,6 +62,38 @@ discovery:
     expect(runtime.buildId).toBe('release-build-016');
   });
 
+  test('validates customer-side Vitastor profiles', () => {
+    const validated = validateAgentSettings({
+      storage: {
+        drivers: {
+          vitastor: {
+            profiles: [{
+              context: '*',
+              endpoints: ['http://10.10.8.201:12379'],
+              prefix: '/vitastor',
+              auth: { username: 'reader', password: 'secret' },
+              metrics: {
+                scheme: 'http',
+                auth: { mode: 'bearer', bearer_token: 'metrics-secret' }
+              }
+            }]
+          }
+        }
+      }
+    });
+
+    expect(validated.storageDrivers.vitastor.profiles[0]).toMatchObject({
+      context: '*',
+      endpoints: ['http://10.10.8.201:12379'],
+      prefix: '/vitastor',
+      auth: { username: 'reader', password: 'secret' },
+      metrics: {
+        scheme: 'http',
+        auth: { mode: 'bearer', bearerToken: 'metrics-secret' }
+      }
+    });
+  });
+
   test('redacts credentials from optional rotating file logs', () => withTemporaryDirectory((directory) => {
     const logPath = path.join(directory, 'agent.log');
     const logger = createAgentLogger({ outputs: [], file: { path: logPath, max_size_mb: 1, max_files: 2 } });

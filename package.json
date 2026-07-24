@@ -6,7 +6,7 @@
     "agent": "node agent/src/cli.js",
     "build": "bun build agent/src/cli.js --compile --outfile dist/kubi-agent",
     "build:linux-amd64": "bun build agent/src/cli.js --compile --target=bun-linux-x64 --outfile dist/kubi-agent-linux-amd64",
-    "check": "node --check agent/src/cli.js && node --check agent/src/config.js && node --check agent/src/control-plane.js && node --check agent/src/kube.js && node --check agent/src/server.js && node --check agent/src/alerting.js && node --check agent/src/logger.js && node --check agent/src/relay.js",
+    "check": "node --check agent/src/cli.js && node --check agent/src/config.js && node --check agent/src/control-plane.js && node --check agent/src/kube.js && node --check agent/src/server.js && node --check agent/src/storage-drivers.js && node --check agent/src/alerting.js && node --check agent/src/logger.js && node --check agent/src/relay.js",
     "test": "bun test tests/*.test.js"
   },
   "dependencies": {

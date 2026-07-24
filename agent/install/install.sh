@@ -80,6 +80,28 @@ discovery:
   # context: production
   # namespace: default
 
+# Optional deep storage metrics. Kubernetes storage inventory works without this.
+# Add a profile only when Vitastor etcd endpoints cannot be discovered from cluster metadata.
+storage:
+  drivers:
+    vitastor:
+      profiles: []
+      # profiles:
+      #   - context: production
+      #     endpoints:
+      #       - http://10.10.8.201:2379
+      #     prefix: /vitastor
+      #     # auth:
+      #     #   username: vitastor
+      #     #   password: replace-me
+      #     # tls:
+      #     #   ca_file: /etc/kubi-agent/tls/etcd-ca.pem
+      #     #   cert_file: /etc/kubi-agent/tls/etcd-client.pem
+      #     #   key_file: /etc/kubi-agent/tls/etcd-client-key.pem
+      #     # metrics:
+      #     #   scheme: http
+      #     #   timeout_seconds: 5
+
 logging:
   level: info
   outputs:
@@ -89,7 +111,7 @@ logging:
   #   max_size_mb: 10
   #   max_files: 5
 EOF
-    chmod 0640 /etc/kubi-agent/agent.yaml
+    chmod 0600 /etc/kubi-agent/agent.yaml
   fi
   "$INSTALL_DIR/kubi-agent" pair --control-plane-url "$CONTROL_PLANE_URL" --pairing-token "$PAIRING_TOKEN"
 

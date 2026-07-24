@@ -4,7 +4,13 @@ import https from 'node:https';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { discoverLocalAccessCandidates, fetchKubeJson, fetchKubeText, resolveAgentRuntimeConfigForSelector } from '../agent/src/kube.js';
+import {
+  buildRuntimeSecretInventory,
+  discoverLocalAccessCandidates,
+  fetchKubeJson,
+  fetchKubeText,
+  resolveAgentRuntimeConfigForSelector
+} from '../agent/src/kube.js';
 
 const kubeconfig = (server = 'https://shared.invalid') => `apiVersion: v1
 kind: Config
@@ -124,5 +130,38 @@ describe('kubeconfig source merge', () => {
       else process.env.KUBECONFIG = previousKubeconfig;
       fs.rmSync(tempDir, { recursive: true, force: true });
     }
+  });
+
+  test('reports active Pod and owning Workload Secret references without values', () => {
+    const inventory = buildRuntimeSecretInventory(
+      [{
+        metadata: { name: 'kubi-saas-env', namespace: 'kubi-saas' },
+        type: 'Opaque',
+        data: { SESSION_SECRET: 'never-return-this-value' }
+      }],
+      [{
+        metadata: {
+          name: 'kubi-saas-0',
+          namespace: 'kubi-saas',
+          ownerReferences: [{ kind: 'StatefulSet', name: 'kubi-saas' }]
+        },
+        status: { phase: 'Running' },
+        spec: {
+          containers: [{
+            name: 'app',
+            envFrom: [{ secretRef: { name: 'kubi-saas-env' } }]
+          }]
+        }
+      }],
+      [],
+      [],
+      '2026-07-24T00:00:00.000Z',
+      null
+    );
+
+    const secret = inventory.secrets.items[0];
+    expect(secret.references).toMatchObject({ total: 2, pods: 1, workloads: 1 });
+    expect(secret.referencedBy.map((reference) => reference.kind)).toEqual(['Pod', 'Workload']);
+    expect(JSON.stringify(secret)).not.toContain('never-return-this-value');
   });
 });

@@ -8,6 +8,9 @@ describe('agent installer safety', () => {
     expect(source).toContain('curl -fsSL "$DOWNLOAD_BASE_URL/$ARTIFACT.sha256"');
     expect(source).toContain('Checksum verification failed');
     expect(source.indexOf('if [ "$EXPECTED" != "$ACTUAL" ]')).toBeLessThan(source.indexOf('pair --control-plane-url'));
+    expect(source).toContain('storage:');
+    expect(source).toContain('drivers:');
+    expect(source).toContain('chmod 0600 /etc/kubi-agent/agent.yaml');
   });
 
   test('Windows installer verifies checksum before pairing', () => {

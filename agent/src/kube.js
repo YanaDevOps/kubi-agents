@@ -12,11 +12,11 @@ import {
   BACKUP_RESOURCE_DEFINITIONS,
   buildUniversalBackupActivitySummary
 } from '../../src/shared/backup-activity.js';
+import { deriveRuntimeTargetKey } from '../../src/shared/runtime-target.js';
 import {
   buildGatewayApiValidationItems,
   gatewayApiDefinitionsFromCrds
 } from '../../src/shared/gateway-api-validation.js';
-import { deriveRuntimeTargetKey } from '../../src/shared/runtime-target.js';
 import {
   buildPortsTruthSummary,
   buildTrafficIntentSummary,
@@ -1133,6 +1133,7 @@ export function resolveAgentRuntimeConfigForSelector(runtimeConfig, selector, op
     return {
       ...runtimeConfig,
       kubeContext: contextName,
+      clusterFingerprint: selector.clusterFingerprint,
       kubeConfig: cached.kubeConfig
     };
   }
@@ -1183,6 +1184,7 @@ export function resolveAgentRuntimeConfigForSelector(runtimeConfig, selector, op
   return {
     ...runtimeConfig,
     kubeContext: contextName,
+    clusterFingerprint: candidate.clusterFingerprint,
     kubeConfig
   };
 }
@@ -1972,13 +1974,30 @@ function referenceKey(namespace, name) {
   return `${namespace}/${name}`;
 }
 
-function addObjectRef(refs, namespace, name, ref) {
+function referenceId(secretKey, ref) {
+  return `ref:${secretKey}:${String(ref.kind).toLowerCase()}:${ref.namespace || 'default'}/${ref.name}`;
+}
+
+function appendReferencePath(ref, path) {
+  if (!ref.paths.some((entry) => entry.type === path.type && entry.field === path.field && entry.source === path.source)) {
+    ref.paths.push(path);
+  }
+}
+
+function addObjectRef(refs, namespace, name, ref, path) {
   if (!name) return;
   const key = referenceKey(namespace, name);
   const existing = refs.get(key) || [];
-  if (!existing.some((entry) => entry.kind === ref.kind && entry.name === ref.name && entry.namespace === ref.namespace)) {
-    existing.push(ref);
+  let current = existing.find((entry) => entry.kind === ref.kind && entry.name === ref.name && entry.namespace === ref.namespace);
+  if (!current) {
+    current = {
+      id: referenceId(key, ref),
+      ...ref,
+      paths: []
+    };
+    existing.push(current);
   }
+  appendReferencePath(current, path);
   refs.set(key, existing);
 }
 
@@ -1991,38 +2010,126 @@ function collectRuntimeSecretRefs(pods, serviceAccounts, ingresses) {
   const refs = new Map();
   for (const pod of asRecordArray(pods)) {
     const meta = metadataFor(pod);
+    const phase = stringOrUndefined(asRecord(pod.status)?.phase);
+    if (phase === 'Succeeded' || phase === 'Failed') continue;
     const spec = asRecord(pod.spec);
-    const podRef = { kind: 'Pod', name: meta.name, namespace: meta.namespace };
-    for (const volume of asRecordArray(spec?.volumes)) {
-      addObjectRef(refs, meta.namespace, stringOrUndefined(asRecord(volume.secret)?.secretName), podRef);
-    }
-    for (const pullSecret of asRecordArray(spec?.imagePullSecrets)) {
-      addObjectRef(refs, meta.namespace, stringOrUndefined(pullSecret.name), podRef);
-    }
-    for (const container of podContainersForRefs(pod)) {
-      for (const env of asRecordArray(container.env)) {
-        addObjectRef(refs, meta.namespace, stringOrUndefined(asRecord(asRecord(env.valueFrom)?.secretKeyRef)?.name), podRef);
+    const owner = meta.ownerReferences.find((entry) => entry.controller === true) || meta.ownerReferences[0];
+    const podRef = {
+      kind: 'Pod',
+      name: meta.name,
+      namespace: meta.namespace,
+      resourceType: 'Pod',
+      source: 'podSpec'
+    };
+    const addPodReference = (secretName, path) => {
+      addObjectRef(refs, meta.namespace, secretName, podRef, path);
+      const ownerKind = stringOrUndefined(owner?.kind);
+      const ownerName = stringOrUndefined(owner?.name);
+      if (ownerKind && ownerName) {
+        addObjectRef(
+          refs,
+          meta.namespace,
+          secretName,
+          {
+            kind: 'Workload',
+            name: ownerName,
+            namespace: meta.namespace,
+            resourceType: ownerKind,
+            source: 'podOwner'
+          },
+          { type: 'workloadOwner', field: `pod/${meta.name}`, source: 'podOwner' }
+        );
       }
-      for (const envFrom of asRecordArray(container.envFrom)) {
-        addObjectRef(refs, meta.namespace, stringOrUndefined(asRecord(envFrom.secretRef)?.name), podRef);
+    };
+    for (const [index, volume] of asRecordArray(spec?.volumes).entries()) {
+      addPodReference(
+        stringOrUndefined(asRecord(volume.secret)?.secretName),
+        { type: 'volumeMount', field: `spec.volumes[${index}]`, source: 'podSpec' }
+      );
+    }
+    for (const [index, pullSecret] of asRecordArray(spec?.imagePullSecrets).entries()) {
+      addPodReference(
+        stringOrUndefined(pullSecret.name),
+        { type: 'imagePullSecrets', field: `spec.imagePullSecrets[${index}]`, source: 'podSpec' }
+      );
+    }
+    for (const [containerIndex, container] of podContainersForRefs(pod).entries()) {
+      for (const [envIndex, env] of asRecordArray(container.env).entries()) {
+        addPodReference(
+          stringOrUndefined(asRecord(asRecord(env.valueFrom)?.secretKeyRef)?.name),
+          { type: 'env', field: `spec.containers[${containerIndex}].env[${envIndex}]`, source: 'podSpec' }
+        );
+      }
+      for (const [envFromIndex, envFrom] of asRecordArray(container.envFrom).entries()) {
+        addPodReference(
+          stringOrUndefined(asRecord(envFrom.secretRef)?.name),
+          { type: 'envFrom', field: `spec.containers[${containerIndex}].envFrom[${envFromIndex}]`, source: 'podSpec' }
+        );
       }
     }
   }
   for (const serviceAccount of asRecordArray(serviceAccounts)) {
     const meta = metadataFor(serviceAccount);
-    const serviceAccountRef = { kind: 'ServiceAccount', name: meta.name, namespace: meta.namespace };
-    for (const secretRef of [...asRecordArray(serviceAccount.secrets), ...asRecordArray(serviceAccount.imagePullSecrets)]) {
-      addObjectRef(refs, meta.namespace, stringOrUndefined(secretRef.name), serviceAccountRef);
+    const serviceAccountRef = {
+      kind: 'ServiceAccount',
+      name: meta.name,
+      namespace: meta.namespace,
+      resourceType: 'ServiceAccount',
+      source: 'serviceAccount'
+    };
+    for (const [index, secretRef] of asRecordArray(serviceAccount.secrets).entries()) {
+      addObjectRef(
+        refs,
+        meta.namespace,
+        stringOrUndefined(secretRef.name),
+        serviceAccountRef,
+        { type: 'serviceAccountSecret', field: `secrets[${index}]`, source: 'serviceAccount' }
+      );
+    }
+    for (const [index, secretRef] of asRecordArray(serviceAccount.imagePullSecrets).entries()) {
+      addObjectRef(
+        refs,
+        meta.namespace,
+        stringOrUndefined(secretRef.name),
+        serviceAccountRef,
+        { type: 'serviceAccountImagePullSecrets', field: `imagePullSecrets[${index}]`, source: 'serviceAccount' }
+      );
     }
   }
   for (const ingress of asRecordArray(ingresses)) {
     const meta = metadataFor(ingress);
-    const ingressRef = { kind: 'Ingress', name: meta.name, namespace: meta.namespace };
-    for (const tls of asRecordArray(asRecord(ingress.spec)?.tls)) {
-      addObjectRef(refs, meta.namespace, stringOrUndefined(tls.secretName), ingressRef);
+    const ingressRef = {
+      kind: 'Ingress',
+      name: meta.name,
+      namespace: meta.namespace,
+      resourceType: 'Ingress',
+      source: 'ingressSpec'
+    };
+    for (const [index, tls] of asRecordArray(asRecord(ingress.spec)?.tls).entries()) {
+      addObjectRef(
+        refs,
+        meta.namespace,
+        stringOrUndefined(tls.secretName),
+        ingressRef,
+        { type: 'ingressTLS', field: `spec.tls[${index}].secretName`, source: 'ingressSpec' }
+      );
     }
   }
   return refs;
+}
+
+function secretReferenceCounts(referencedBy) {
+  return referencedBy.reduce(
+    (summary, reference) => {
+      summary.total += 1;
+      if (reference.kind === 'Pod') summary.pods += 1;
+      if (reference.kind === 'Workload') summary.workloads += 1;
+      if (reference.kind === 'ServiceAccount') summary.serviceAccounts += 1;
+      if (reference.kind === 'Ingress') summary.ingresses += 1;
+      return summary;
+    },
+    { total: 0, pods: 0, workloads: 0, serviceAccounts: 0, ingresses: 0 }
+  );
 }
 
 function estimateSecretBytes(data) {
@@ -2035,6 +2142,7 @@ function normalizeRuntimeSecret(record, refs) {
   const annotations = asStringRecord(metadata?.annotations);
   const data = asStringRecord(record.data);
   const referencedBy = refs.get(referenceKey(meta.namespace, meta.name)) || [];
+  const references = secretReferenceCounts(referencedBy);
   const type = stringOrUndefined(record.type) || 'Opaque';
   const dataKeys = Object.keys(data).sort((left, right) => left.localeCompare(right));
   const riskFlags = [];
@@ -2048,23 +2156,32 @@ function normalizeRuntimeSecret(record, refs) {
   if (meta.namespace === 'kube-system' || meta.name.startsWith('sh.helm.release.v1.')) riskFlags.push('system-managed');
 
   return {
+    id: `secret:${meta.namespace}/${meta.name}`,
     name: meta.name,
     namespace: meta.namespace,
     type,
     createdAt: meta.createdAt,
+    labels: meta.labels,
+    annotations,
     dataKeys,
     dataKeyCount: dataKeys.length,
     totalBytes: estimateSecretBytes(data),
+    dataRedacted: false,
     immutable: record.immutable === true,
     labelsCount: Object.keys(meta.labels).length,
     annotationsCount: Object.keys(annotations).length,
-    referenceCount: referencedBy.length,
+    referenceCount: references.total,
+    references,
     referencedBy,
-    riskFlags
+    riskFlags,
+    riskSignals: riskFlags,
+    ownerKinds: [...new Set(meta.ownerReferences.map((entry) => stringOrUndefined(entry.kind)).filter(Boolean))],
+    resourceType: 'Secret',
+    source: 'kubernetes'
   };
 }
 
-function buildRuntimeSecretInventory(secrets, pods, serviceAccounts, ingresses, fetchedAt, namespaceScope, issues = [], partial = false) {
+export function buildRuntimeSecretInventory(secrets, pods, serviceAccounts, ingresses, fetchedAt, namespaceScope, issues = [], partial = false) {
   const refs = collectRuntimeSecretRefs(pods, serviceAccounts, ingresses);
   const items = asRecordArray(secrets)
     .map((secret) => normalizeRuntimeSecret(secret, refs))
@@ -4107,7 +4224,11 @@ export async function loadLocalBackupActivity(runtimeConfig, namespaceScope = nu
     const resources = await Promise.all(BACKUP_RESOURCE_DEFINITIONS.map(async (definition) => {
       for (const version of definition.versions) {
         try {
-          const response = await fetchKubeList(kubeConfig, backupPath(definition, version), true);
+          const response = await fetchKubeList(
+            kubeConfig,
+            backupPath(definition, version),
+            true
+          );
           if (response.missing) continue;
           return {
             definition,

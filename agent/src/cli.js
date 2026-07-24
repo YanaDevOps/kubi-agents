@@ -2,7 +2,7 @@
 
 import os from 'node:os';
 import process from 'node:process';
-import { getAgentConfigPath, getAgentSettingsPath, loadAgentConfig, loadAgentSettings, LOCAL_AGENT_RUNTIME_API_VERSION, resolveAgentRuntimeConfig, saveAgentConfig, validateAgentSettings } from './config.js';
+import { getAgentConfigPath, getAgentSettingsPath, loadAgentConfig, loadAgentSettings, LOCAL_AGENT_RUNTIME_API_VERSION, redactAgentRuntimeConfig, resolveAgentRuntimeConfig, saveAgentConfig, validateAgentSettings } from './config.js';
 import { registerAgentWithControlPlane, rotateAgentCredentials, sendAgentHeartbeat, syncDiscoveredCandidates } from './control-plane.js';
 import { createAgentLoopbackServer } from './server.js';
 import { scanLocalAccessDiscovery } from './kube.js';
@@ -209,7 +209,7 @@ function configCommand(action) {
   if (action === 'show') {
     const identity = loadAgentConfig();
     const effective = resolveAgentRuntimeConfig(identity, RUNNING_RELEASE);
-    console.log(JSON.stringify({ ...effective, agentSecret: '[redacted]' }, null, 2));
+    console.log(JSON.stringify(redactAgentRuntimeConfig(effective), null, 2));
     return;
   }
   throw new Error('Usage: kubi-agent config validate | config show --effective');

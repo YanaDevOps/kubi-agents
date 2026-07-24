@@ -43,6 +43,7 @@ import {
   saveAlertingConfig,
   testAlertingChannel
 } from './alerting.js';
+import { loadLocalStorageDriverOverview } from './storage-drivers.js';
 
 function json(response, status, payload, headers = {}) {
   response.writeHead(status, {
@@ -222,6 +223,7 @@ export function createAgentLoopbackServer(options) {
   const crdsProvider = options.crdsProvider || loadLocalCrds;
   const crdObjectsProvider = options.crdObjectsProvider || loadLocalCrdObjects;
   const storageProvider = options.storageProvider || loadLocalStorage;
+  const storageDriverProvider = options.storageDriverProvider || loadLocalStorageDriverOverview;
   const storageEventsProvider = options.storageEventsProvider || loadLocalStorageEvents;
   const componentsProvider = options.componentsProvider || loadLocalComponentInventory;
   const deliveryActivityProvider = options.deliveryActivityProvider || loadLocalDeliveryActivity;
@@ -700,6 +702,16 @@ export function createAgentLoopbackServer(options) {
         return {
           status: 200,
           payload: await storageProvider(runtimeConfig, url.searchParams.get('ns')),
+          headers: responseCorsHeaders
+        };
+      }
+
+      if (url.pathname === '/v1/storage-driver-overview') {
+        return {
+          status: 200,
+          payload: await storageDriverProvider(runtimeConfig, {
+            driver: url.searchParams.get('driver') || ''
+          }),
           headers: responseCorsHeaders
         };
       }

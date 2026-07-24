@@ -7,7 +7,8 @@ function redact(value) {
   return String(value)
     .replace(/(Bearer\s+)[^\s]+/gi, '$1[redacted]')
     .replace(/(pairing[-_ ]token[=: ]+)[^\s]+/gi, '$1[redacted]')
-    .replace(/(agent[-_ ]secret[=: ]+)[^\s]+/gi, '$1[redacted]');
+    .replace(/(agent[-_ ]secret[=: ]+)[^\s]+/gi, '$1[redacted]')
+    .replace(/((?:password|bearer[_-]?token|client[_-]?key)[=: ]+)[^\s]+/gi, '$1[redacted]');
 }
 
 function rotate(filePath, maxSizeBytes, maxFiles) {

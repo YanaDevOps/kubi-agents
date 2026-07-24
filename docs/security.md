@@ -20,6 +20,8 @@ Domain Health reads cert-manager `certificates`, `orders`, and `challenges` when
 
 Gateway API validation reads only installed Gateway API custom resources, Service summaries, and endpoint readiness already available through the selected kubeconfig. It does not mutate routes, call backend workloads, or execute server-side authorization probes.
 
+Deep storage driver queries run on the agent host. Vitastor credentials and TLS file paths stay in `/etc/kubi-agent/agent.yaml`, are never sent to SaaS, and are redacted from effective-config output and logs. Use a read-only etcd account and restrict the configuration file to the service account.
+
 ## Backup Discovery
 
 Backup activity is read from Kubernetes custom-resource metadata through the same selected kubeconfig and read-only runtime boundary. The agent does not call vendor cloud APIs, read Kubernetes Secret values, persist raw custom resources in SaaS, or create/restore/delete backup resources.
