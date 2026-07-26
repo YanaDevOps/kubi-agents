@@ -3768,6 +3768,57 @@ function workloadContains(record, needles) {
   return needles.some((needle) => text.includes(needle));
 }
 
+function workloadImageRepositories(record) {
+  const template = asRecord(asRecord(record.spec)?.template);
+  const podSpec = asRecord(template?.spec);
+  const containers = [...asRecordArray(podSpec?.containers), ...asRecordArray(podSpec?.initContainers)];
+  return containers
+    .map((container) => (stringOrUndefined(container.image) || '').trim().toLowerCase())
+    .filter(Boolean)
+    .map((image) => {
+      const withoutDigest = image.split('@', 1)[0];
+      const lastSlash = withoutDigest.lastIndexOf('/');
+      const lastColon = withoutDigest.lastIndexOf(':');
+      return lastColon > lastSlash ? withoutDigest.slice(0, lastColon) : withoutDigest;
+    });
+}
+
+function repositoryMatches(repository, expected) {
+  return repository === expected || repository.endsWith(`/${expected}`);
+}
+
+function workloadHasImage(record, repositories) {
+  return workloadImageRepositories(record).some((repository) =>
+    repositories.some((expected) => repositoryMatches(repository, expected))
+  );
+}
+
+function workloadHasImageBasename(record, basenames) {
+  return workloadImageRepositories(record).some((repository) => {
+    const basename = repository.slice(repository.lastIndexOf('/') + 1);
+    return basenames.includes(basename);
+  });
+}
+
+function workloadHasIdentity(record, identities) {
+  const meta = metadataFor(record);
+  const values = [
+    meta.name,
+    meta.labels['app.kubernetes.io/name'],
+    meta.labels.app,
+    meta.labels['k8s-app']
+  ].filter(Boolean).map((value) => value.toLowerCase());
+  return values.some((value) =>
+    identities.some((identity) => value === identity || value.startsWith(`${identity}-`) || value.endsWith(`-${identity}`))
+  );
+}
+
+function workloadHasHelperIdentity(record, identities) {
+  const meta = metadataFor(record);
+  const values = [meta.name, ...Object.values(meta.labels)].map((value) => value.toLowerCase());
+  return values.some((value) => identities.some((identity) => value.includes(identity)));
+}
+
 function matchStorageClassEvidence(storageClasses, needles) {
   return storageClasses
     .filter((record) => {
@@ -5031,9 +5082,117 @@ export async function loadLocalComponentInventory(runtimeConfig) {
         'observability',
         'Grafana evidence from workload names, labels, or container images.',
         [
-          ...matchDeploymentEvidence(deployments, (_meta, record) => workloadContains(record, ['grafana'])),
-          ...matchStatefulSetEvidence(statefulSets, (record) => workloadContains(record, ['grafana'])),
-          ...matchDaemonSetEvidence(daemonSets, (_meta, record) => workloadContains(record, ['grafana']))
+          ...matchDeploymentEvidence(deployments, (_meta, record) => workloadHasImage(record, ['grafana/grafana']) || workloadHasIdentity(record, ['grafana'])),
+          ...matchStatefulSetEvidence(statefulSets, (record) => workloadHasImage(record, ['grafana/grafana']) || workloadHasIdentity(record, ['grafana'])),
+          ...matchDaemonSetEvidence(daemonSets, (_meta, record) => workloadHasImage(record, ['grafana/grafana']) || workloadHasIdentity(record, ['grafana']))
+        ]
+      ),
+      componentSummary(
+        'loki',
+        'Loki',
+        'observability',
+        'Loki evidence from server workloads or loki.grafana.com CRDs.',
+        [
+          ...matchDeploymentEvidence(deployments, (_meta, record) =>
+            !workloadHasHelperIdentity(record, ['loki-canary', 'loki-operator']) &&
+            (workloadHasImage(record, ['grafana/loki']) || workloadHasIdentity(record, ['loki']))
+          ),
+          ...matchStatefulSetEvidence(statefulSets, (record) =>
+            !workloadHasHelperIdentity(record, ['loki-canary', 'loki-operator']) &&
+            (workloadHasImage(record, ['grafana/loki']) || workloadHasIdentity(record, ['loki']))
+          ),
+          ...matchDaemonSetEvidence(daemonSets, (_meta, record) =>
+            !workloadHasHelperIdentity(record, ['loki-canary', 'loki-operator']) &&
+            (workloadHasImage(record, ['grafana/loki']) || workloadHasIdentity(record, ['loki']))
+          ),
+          ...matchCrdEvidence(crds, (record) => stringOrUndefined(asRecord(record.spec)?.group) === 'loki.grafana.com')
+        ]
+      ),
+      componentSummary(
+        'tempo',
+        'Tempo',
+        'observability',
+        'Tempo evidence from server workloads or tempo.grafana.com CRDs.',
+        [
+          ...matchDeploymentEvidence(deployments, (_meta, record) =>
+            !workloadHasHelperIdentity(record, ['tempo-operator']) &&
+            (workloadHasImage(record, ['grafana/tempo']) || workloadHasIdentity(record, ['tempo']))
+          ),
+          ...matchStatefulSetEvidence(statefulSets, (record) =>
+            !workloadHasHelperIdentity(record, ['tempo-operator']) &&
+            (workloadHasImage(record, ['grafana/tempo']) || workloadHasIdentity(record, ['tempo']))
+          ),
+          ...matchDaemonSetEvidence(daemonSets, (_meta, record) =>
+            !workloadHasHelperIdentity(record, ['tempo-operator']) &&
+            (workloadHasImage(record, ['grafana/tempo']) || workloadHasIdentity(record, ['tempo']))
+          ),
+          ...matchCrdEvidence(crds, (record) => stringOrUndefined(asRecord(record.spec)?.group) === 'tempo.grafana.com')
+        ]
+      ),
+      componentSummary(
+        'opentelemetry-collector',
+        'OpenTelemetry Collector',
+        'observability',
+        'OpenTelemetry Collector evidence from collector workloads or opentelemetry.io CRDs.',
+        [
+          ...matchDeploymentEvidence(deployments, (_meta, record) =>
+            !workloadHasHelperIdentity(record, ['opentelemetry-operator']) &&
+            (workloadHasImageBasename(record, ['opentelemetry-collector', 'opentelemetry-collector-contrib', 'opentelemetry-collector-k8s']) ||
+              workloadHasIdentity(record, ['opentelemetry-collector', 'otel-collector', 'otelcol']))
+          ),
+          ...matchStatefulSetEvidence(statefulSets, (record) =>
+            !workloadHasHelperIdentity(record, ['opentelemetry-operator']) &&
+            (workloadHasImageBasename(record, ['opentelemetry-collector', 'opentelemetry-collector-contrib', 'opentelemetry-collector-k8s']) ||
+              workloadHasIdentity(record, ['opentelemetry-collector', 'otel-collector', 'otelcol']))
+          ),
+          ...matchDaemonSetEvidence(daemonSets, (_meta, record) =>
+            !workloadHasHelperIdentity(record, ['opentelemetry-operator']) &&
+            (workloadHasImageBasename(record, ['opentelemetry-collector', 'opentelemetry-collector-contrib', 'opentelemetry-collector-k8s']) ||
+              workloadHasIdentity(record, ['opentelemetry-collector', 'otel-collector', 'otelcol']))
+          ),
+          ...matchCrdEvidence(crds, (record) => stringOrUndefined(asRecord(record.spec)?.group) === 'opentelemetry.io')
+        ]
+      ),
+      componentSummary(
+        'fluent-bit',
+        'Fluent Bit',
+        'observability',
+        'Fluent Bit evidence from collector workloads or fluentbit.fluent.io CRDs.',
+        [
+          ...matchDeploymentEvidence(deployments, (_meta, record) =>
+            !workloadHasHelperIdentity(record, ['fluent-operator', 'fluentbit-operator']) &&
+            (workloadHasImageBasename(record, ['fluent-bit', 'aws-for-fluent-bit']) || workloadHasIdentity(record, ['fluent-bit', 'fluentbit']))
+          ),
+          ...matchStatefulSetEvidence(statefulSets, (record) =>
+            !workloadHasHelperIdentity(record, ['fluent-operator', 'fluentbit-operator']) &&
+            (workloadHasImageBasename(record, ['fluent-bit', 'aws-for-fluent-bit']) || workloadHasIdentity(record, ['fluent-bit', 'fluentbit']))
+          ),
+          ...matchDaemonSetEvidence(daemonSets, (_meta, record) =>
+            !workloadHasHelperIdentity(record, ['fluent-operator', 'fluentbit-operator']) &&
+            (workloadHasImageBasename(record, ['fluent-bit', 'aws-for-fluent-bit']) || workloadHasIdentity(record, ['fluent-bit', 'fluentbit']))
+          ),
+          ...matchCrdEvidence(crds, (record) => stringOrUndefined(asRecord(record.spec)?.group) === 'fluentbit.fluent.io')
+        ]
+      ),
+      componentSummary(
+        'fluentd',
+        'Fluentd',
+        'observability',
+        'Fluentd evidence from collector workloads or fluentd.fluent.io CRDs.',
+        [
+          ...matchDeploymentEvidence(deployments, (_meta, record) =>
+            !workloadHasHelperIdentity(record, ['fluent-operator', 'fluentd-operator']) &&
+            (workloadHasImageBasename(record, ['fluentd', 'fluentd-kubernetes-daemonset']) || workloadHasIdentity(record, ['fluentd']))
+          ),
+          ...matchStatefulSetEvidence(statefulSets, (record) =>
+            !workloadHasHelperIdentity(record, ['fluent-operator', 'fluentd-operator']) &&
+            (workloadHasImageBasename(record, ['fluentd', 'fluentd-kubernetes-daemonset']) || workloadHasIdentity(record, ['fluentd']))
+          ),
+          ...matchDaemonSetEvidence(daemonSets, (_meta, record) =>
+            !workloadHasHelperIdentity(record, ['fluent-operator', 'fluentd-operator']) &&
+            (workloadHasImageBasename(record, ['fluentd', 'fluentd-kubernetes-daemonset']) || workloadHasIdentity(record, ['fluentd']))
+          ),
+          ...matchCrdEvidence(crds, (record) => stringOrUndefined(asRecord(record.spec)?.group) === 'fluentd.fluent.io')
         ]
       ),
       componentSummary(

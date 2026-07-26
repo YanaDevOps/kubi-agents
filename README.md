@@ -19,6 +19,7 @@ Agent `v0.1.15` adds provider-neutral backup discovery for Velero/OpenShift OADP
 Agent `v0.1.16` adds read-only Gateway API validation for installed GatewayClass, Gateway, HTTPRoute, GRPCRoute, TLSRoute, TCPRoute, UDPRoute, and ReferenceGrant resources. It reports rejected parents, unresolved references, missing Service backends, stale status, and partial endpoint readiness without executing Kubernetes authorization probes.
 Agent `v0.1.17` consolidates endpoint readiness into one finding per Service and follows Kubernetes targetPort semantics. Numeric target ports do not require an explicit containerPort declaration; unresolved named target ports remain visible.
 Agent `v0.1.18` reports Secret usage through Pod and owning Workload metadata without reading Secret values. It also adds read-only storage driver metrics: Vitastor supports etcd v3 gateway auto-discovery or explicit host-side profiles, while other CSI providers keep generic Kubernetes inventory.
+Agent `v0.1.19` detects Loki, Tempo, OpenTelemetry Collector, Fluent Bit, and Fluentd from running workloads and operator CRDs. CRD-only installations are reported as configured rather than active, while canaries, operators, and unrelated labels are excluded from active detection.
 
 ## Install
 
