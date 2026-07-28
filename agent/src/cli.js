@@ -8,6 +8,7 @@ import { createAgentLoopbackServer } from './server.js';
 import { scanLocalAccessDiscovery } from './kube.js';
 import { createAgentRelayClient } from './relay.js';
 import { createAgentLogger } from './logger.js';
+import { coalesceAsyncTask } from './task-runner.js';
 
 const AGENT_VERSION = typeof KUBI_AGENT_COMPILED_VERSION !== 'undefined'
   ? KUBI_AGENT_COMPILED_VERSION
@@ -92,7 +93,7 @@ async function runAgent() {
     lastError: null
   };
 
-  async function refreshDiscovery() {
+  const refreshDiscovery = coalesceAsyncTask(async () => {
     const result = scanLocalAccessDiscovery(runtimeConfig);
     const lastError = result.sourceCount === 0 && result.warnings.length > 0 ? result.warnings.join(' ') : undefined;
     const sync = await syncDiscoveredCandidates({
@@ -109,7 +110,7 @@ async function runAgent() {
     discoveryState.lastScannedAt = sync.lastScannedAt;
     discoveryState.lastError = lastError ?? null;
     return { ...sync, warnings: result.warnings };
-  }
+  });
 
   const server = createAgentLoopbackServer({
     runtimeConfig,
@@ -135,7 +136,7 @@ async function runAgent() {
   logger.info('KUBI agent loopback runtime listening on http://127.0.0.1:47641/v1');
   logger.info(`Using identity ${getAgentConfigPath()} and settings ${getAgentSettingsPath()}`);
 
-  async function heartbeat() {
+  const heartbeat = coalesceAsyncTask(async () => {
     try {
       await sendAgentHeartbeat({
         controlPlaneUrl: runtimeConfig.controlPlaneUrl,
@@ -151,7 +152,7 @@ async function runAgent() {
     } catch (error) {
       logger.error(error instanceof Error ? error.message : 'Agent heartbeat failed.');
     }
-  }
+  });
 
   try {
     const discoveryResult = await refreshDiscovery();
@@ -165,7 +166,10 @@ async function runAgent() {
   await heartbeat();
   const interval = setInterval(heartbeat, Number(config.heartbeatIntervalSeconds || 30) * 1000);
 
+  let shuttingDown = false;
   const shutdown = async () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     clearInterval(interval);
     relay.close();
     await server.close().catch(() => undefined);

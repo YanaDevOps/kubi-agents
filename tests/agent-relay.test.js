@@ -49,6 +49,7 @@ describe('hosted relay client', () => {
 
     try {
       relay.start();
+      relay.start();
       expect(await response).toMatchObject({
         type: 'response',
         requestId: 'request-1',

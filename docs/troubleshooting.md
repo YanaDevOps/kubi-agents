@@ -54,6 +54,10 @@ The agent keeps heartbeat and runtime relay connectivity separate. Agent `v0.1.5
 
 Agent `v0.1.6` and newer use the installed binary release for both heartbeat and runtime health. Upgrading the binary does not require deleting the saved identity or pairing the agent again.
 
+## Control-plane timeouts
+
+The agent uses bounded requests for registration, heartbeats, discovery sync, and token introspection. A `Control-plane request timed out after 15000ms` message means the host did not receive an HTTP response from `app.kubi.live` in time. Verify outbound TCP/443, DNS, proxy policy, and the SaaS health endpoint; the running agent will retry its normal heartbeat and relay lifecycle without spawning overlapping work.
+
 ## Update Required
 
 The installed binary is below the minimum hosted version or reports development build metadata. Download the current binary from the latest GitHub Release, replace it, verify `kubi-agent version`, and restart the service.

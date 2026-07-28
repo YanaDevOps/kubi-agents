@@ -22,6 +22,7 @@ export function createAgentRelayClient(options) {
   let readyTimer = null;
   let livenessTimer = null;
   let closed = false;
+  let started = false;
   let awaitingPong = false;
   const reconnectBaseDelayMs = Number(options.reconnectBaseDelayMs ?? 1_000);
   const reconnectMaxDelayMs = Number(options.reconnectMaxDelayMs ?? 30_000);
@@ -152,9 +153,12 @@ export function createAgentRelayClient(options) {
 
   return {
     start() {
+      if (started || closed) return;
+      started = true;
       connect();
     },
     close() {
+      if (closed) return;
       closed = true;
       if (reconnectTimer) clearTimeout(reconnectTimer);
       reconnectTimer = null;
