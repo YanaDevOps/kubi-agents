@@ -13,6 +13,7 @@ import {
   buildUniversalBackupActivitySummary
 } from '../../src/shared/backup-activity.js';
 import { deriveRuntimeTargetKey } from '../../src/shared/runtime-target.js';
+import { classifySystemConfigMap } from '../../src/shared/system-configmap.js';
 import {
   buildGatewayApiValidationItems,
   gatewayApiDefinitionsFromCrds
@@ -2835,7 +2836,7 @@ function isRuntimeSystemNamespace(namespace) {
   return namespace === 'kube-system' || namespace === 'kube-public' || namespace === 'kube-node-lease';
 }
 
-function buildRuntimeGhostResources(services, endpointSlices, ingresses, pvcs, pods, configMaps, secrets, serviceAccounts, replicaSets, fetchedAt, namespaceScope, issues = [], partial = false) {
+export function buildRuntimeGhostResources(services, endpointSlices, ingresses, pvcs, pods, configMaps, secrets, serviceAccounts, replicaSets, fetchedAt, namespaceScope, issues = [], partial = false) {
   const ghostIssues = [];
   const serviceRecords = asRecordArray(services);
   const serviceKeys = new Set(serviceRecords.map((service) => referenceKey(metadataFor(service).namespace, metadataFor(service).name)));
@@ -2867,8 +2868,8 @@ function buildRuntimeGhostResources(services, endpointSlices, ingresses, pvcs, p
   }
   for (const configMap of asRecordArray(configMaps)) {
     const meta = metadataFor(configMap);
-    if (!isRuntimeSystemNamespace(meta.namespace) && !podRefs.configMaps.has(referenceKey(meta.namespace, meta.name))) {
-      pushRuntimeGhostIssue(ghostIssues, { category: 'unused-configmaps', severity: 'info', resourceKind: 'ConfigMap', resourceName: meta.name, namespace: meta.namespace, reason: 'ConfigMap is not referenced by pod volumes, env, or envFrom in the current snapshot.', related: [{ kind: 'ConfigMap', name: meta.name, namespace: meta.namespace }], suggestedActions: ['Check application configuration history before cleanup.'] });
+    if (!podRefs.configMaps.has(referenceKey(meta.namespace, meta.name))) {
+      pushRuntimeGhostIssue(ghostIssues, { category: 'unused-configmaps', severity: 'info', resourceKind: 'ConfigMap', resourceName: meta.name, namespace: meta.namespace, reason: 'ConfigMap is not referenced by pod volumes, env, or envFrom in the current snapshot.', ...classifySystemConfigMap(configMap), related: [{ kind: 'ConfigMap', name: meta.name, namespace: meta.namespace }], suggestedActions: ['Check application configuration history before cleanup.'] });
     }
   }
   for (const secret of asRecordArray(secrets)) {
@@ -2910,6 +2911,8 @@ function buildRuntimeGhostResources(services, endpointSlices, ingresses, pvcs, p
       brokenIngressBackends: ghostIssues.filter((issue) => issue.category === 'broken-ingress-backends').length,
       unusedPVC: ghostIssues.filter((issue) => issue.category === 'unused-pvc').length,
       unusedConfigMaps: ghostIssues.filter((issue) => issue.category === 'unused-configmaps').length,
+      actionableUnusedConfigMaps: ghostIssues.filter((issue) => issue.category === 'unused-configmaps' && issue.systemManaged !== true).length,
+      systemUnusedConfigMaps: ghostIssues.filter((issue) => issue.category === 'unused-configmaps' && issue.systemManaged === true).length,
       unusedSecrets: ghostIssues.filter((issue) => issue.category === 'unused-secrets').length,
       unusedServiceAccounts: ghostIssues.filter((issue) => issue.category === 'unused-serviceaccounts').length,
       orphanReplicaSets: ghostIssues.filter((issue) => issue.category === 'orphan-replicasets').length,

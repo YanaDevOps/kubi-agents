@@ -21,6 +21,7 @@ Agent `v0.1.17` consolidates endpoint readiness into one finding per Service and
 Agent `v0.1.18` reports Secret usage through Pod and owning Workload metadata without reading Secret values. It also adds read-only storage driver metrics: Vitastor supports etcd v3 gateway auto-discovery or explicit host-side profiles, while other CSI providers keep generic Kubernetes inventory.
 Agent `v0.1.19` detects Loki, Tempo, OpenTelemetry Collector, Fluent Bit, and Fluentd from running workloads and operator CRDs. CRD-only installations are reported as configured rather than active, while canaries, operators, and unrelated labels are excluded from active detection.
 Agent `v0.1.20` bounds control-plane requests, coalesces overlapping heartbeat and discovery work, and makes relay startup and shutdown idempotent. It does not change the runtime API contract.
+Agent `v0.1.21` classifies unused Kubernetes-managed ConfigMaps separately from actionable application ConfigMaps. Standard system namespaces, `kube-root-ca.crt`, and the `kubernetes.io/description` marker are identified without exposing annotation contents; runtime API compatibility remains unchanged.
 
 ## Install
 
