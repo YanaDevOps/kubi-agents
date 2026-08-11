@@ -15,6 +15,18 @@ discovery:
   # context: production
   # namespace: default
 
+metrics_exporter:
+  enabled: false
+  listen_address: 127.0.0.1
+  port: 9464
+  collection_interval_seconds: 60
+  contexts: []
+  # bearer_token_file: /etc/kubi-agent/metrics.token
+  # allow_insecure_http: false
+  # tls:
+  #   cert_file: /etc/kubi-agent/tls/metrics.crt
+  #   key_file: /etc/kubi-agent/tls/metrics.key
+
 logging:
   level: info
   outputs:
@@ -62,6 +74,8 @@ Environment variables override YAML: `KUBI_AGENT_CONFIG`, `KUBI_AGENT_CONTROL_PL
 Use `kubi-agent config validate` before restart and `kubi-agent config show --effective` to inspect merged settings. Identity secrets are redacted.
 
 By default systemd captures stdout/stderr in journald. Optional file output uses size rotation and never intentionally logs kubeconfig contents, tokens, certificates, or Kubernetes response payloads.
+
+`metrics_exporter` is independent of the KUBI plan and disabled by default. Empty `contexts` collects all unambiguous discovered contexts. A non-loopback `listen_address` requires `bearer_token_file` plus TLS unless `allow_insecure_http: true` is explicitly set for an already protected private network. See [Prometheus metrics](prometheus-metrics.md).
 
 ## Storage driver metrics
 

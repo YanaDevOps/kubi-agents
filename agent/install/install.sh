@@ -80,6 +80,20 @@ discovery:
   # context: production
   # namespace: default
 
+# Optional Prometheus pull endpoint. It is disabled and loopback-only by default.
+# The exporter exposes aggregate agent/cluster health, never credentials or per-resource names.
+metrics_exporter:
+  enabled: false
+  listen_address: 127.0.0.1
+  port: 9464
+  collection_interval_seconds: 60
+  contexts: []
+  # bearer_token_file: /etc/kubi-agent/metrics.token
+  # allow_insecure_http: false
+  # tls:
+  #   cert_file: /etc/kubi-agent/tls/metrics.crt
+  #   key_file: /etc/kubi-agent/tls/metrics.key
+
 # Optional deep storage metrics. Kubernetes storage inventory works without this.
 # Add a profile only when Vitastor etcd endpoints cannot be discovered from cluster metadata.
 storage:

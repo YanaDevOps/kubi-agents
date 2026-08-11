@@ -12,6 +12,8 @@ Pairing tokens are one-time and expire after 30 minutes. After registration the 
 
 The loopback listener on `127.0.0.1:47641` remains for local diagnostics and compatibility. Do not expose it publicly; hosted browser traffic uses the outbound relay.
 
+The optional Prometheus endpoint is a separate server and cannot route to the local runtime API. It emits only bounded aggregate metrics. Its default bind is `127.0.0.1:9464`; remote binds require a protected bearer-token file and TLS unless authenticated plaintext HTTP is explicitly enabled on a trusted network.
+
 Installers verify SHA-256 before installation. Release assets include cosign signatures and certificates for independent verification.
 
 PVC usage is optional and read-only. The agent requests kubelet summary data through the Kubernetes API `nodes/proxy` subresource; it never opens kubelet ports directly. If RBAC denies that path, KUBI reports usage as unavailable and continues to show PV, PVC, StorageClass, and CSI inventory.

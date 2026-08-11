@@ -8,6 +8,7 @@ import { createAgentLoopbackServer } from './server.js';
 import { scanLocalAccessDiscovery } from './kube.js';
 import { createAgentRelayClient } from './relay.js';
 import { createAgentLogger } from './logger.js';
+import { createAgentMetricsState, createPrometheusExporter } from './metrics-exporter.js';
 import { coalesceAsyncTask } from './task-runner.js';
 
 const AGENT_VERSION = typeof KUBI_AGENT_COMPILED_VERSION !== 'undefined'
@@ -86,6 +87,7 @@ async function runAgent() {
   const config = loadAgentConfig();
   const runtimeConfig = resolveAgentRuntimeConfig(config, RUNNING_RELEASE);
   const logger = createAgentLogger(runtimeConfig.logging);
+  const metricsState = createAgentMetricsState();
   const discoveryState = {
     candidateCount: 0,
     sourceCount: 0,
@@ -94,22 +96,30 @@ async function runAgent() {
   };
 
   const refreshDiscovery = coalesceAsyncTask(async () => {
-    const result = scanLocalAccessDiscovery(runtimeConfig);
-    const lastError = result.sourceCount === 0 && result.warnings.length > 0 ? result.warnings.join(' ') : undefined;
-    const sync = await syncDiscoveredCandidates({
-      controlPlaneUrl: runtimeConfig.controlPlaneUrl,
-      agentId: runtimeConfig.agentId,
-      agentSecret: runtimeConfig.agentSecret,
-      candidates: result.candidates,
-      sourceCount: result.sourceCount,
-      ...(lastError ? { lastError } : {})
-    });
+    try {
+      const result = scanLocalAccessDiscovery(runtimeConfig);
+      const lastError = result.sourceCount === 0 && result.warnings.length > 0 ? result.warnings.join(' ') : undefined;
+      const sync = await syncDiscoveredCandidates({
+        controlPlaneUrl: runtimeConfig.controlPlaneUrl,
+        agentId: runtimeConfig.agentId,
+        agentSecret: runtimeConfig.agentSecret,
+        candidates: result.candidates,
+        sourceCount: result.sourceCount,
+        ...(lastError ? { lastError } : {})
+      });
 
-    discoveryState.candidateCount = sync.syncedCount;
-    discoveryState.sourceCount = sync.sourceCount;
-    discoveryState.lastScannedAt = sync.lastScannedAt;
-    discoveryState.lastError = lastError ?? null;
-    return { ...sync, warnings: result.warnings };
+      discoveryState.candidateCount = sync.syncedCount;
+      discoveryState.sourceCount = sync.sourceCount;
+      discoveryState.lastScannedAt = sync.lastScannedAt;
+      discoveryState.lastError = lastError ?? null;
+      metricsState.discoveredContexts = result.candidates.filter((candidate) => candidate.recommendedMode === 'agent').length;
+      metricsState.discoverySources = result.sourceCount;
+      metricsState.discoveryLastSuccessTimestampSeconds = Math.floor(Date.now() / 1000);
+      return { ...sync, warnings: result.warnings };
+    } catch (error) {
+      metricsState.errors.discovery += 1;
+      throw error;
+    }
   });
 
   const server = createAgentLoopbackServer({
@@ -125,13 +135,31 @@ async function runAgent() {
     version: AGENT_VERSION,
     capabilities: DEFAULT_CAPABILITIES,
     onStatus(status) {
+      metricsState.relayConnected = status === 'connected';
       logger.info(status === 'connected' ? 'KUBI hosted relay connected.' : 'KUBI hosted relay disconnected; reconnecting.');
     },
     onError(error) {
+      metricsState.errors.relay += 1;
       logger.warn(`KUBI hosted relay: ${error.message}`);
     }
   });
   relay.start();
+
+  const metricsExporter = createPrometheusExporter({
+    runtimeConfig,
+    version: AGENT_VERSION,
+    runtimeApiVersion: LOCAL_AGENT_RUNTIME_API_VERSION,
+    platform: platformLabel(),
+    state: metricsState
+  });
+  await metricsExporter.start();
+  if (runtimeConfig.metricsExporter.enabled) {
+    void metricsExporter.collect();
+    const protocol = runtimeConfig.metricsExporter.tls.certFile ? 'https' : 'http';
+    logger.info(
+      `Prometheus metrics listening on ${protocol}://${runtimeConfig.metricsExporter.listenAddress}:${runtimeConfig.metricsExporter.port}/metrics`
+    );
+  }
 
   logger.info('KUBI agent loopback runtime listening on http://127.0.0.1:47641/v1');
   logger.info(`Using identity ${getAgentConfigPath()} and settings ${getAgentSettingsPath()}`);
@@ -149,7 +177,9 @@ async function runAgent() {
           discoveredContextCount: discoveryState.candidateCount
         }
       });
+      metricsState.heartbeatLastSuccessTimestampSeconds = Math.floor(Date.now() / 1000);
     } catch (error) {
+      metricsState.errors.heartbeat += 1;
       logger.error(error instanceof Error ? error.message : 'Agent heartbeat failed.');
     }
   });
@@ -172,6 +202,7 @@ async function runAgent() {
     shuttingDown = true;
     clearInterval(interval);
     relay.close();
+    await metricsExporter.close().catch(() => undefined);
     await server.close().catch(() => undefined);
     process.exit(0);
   };

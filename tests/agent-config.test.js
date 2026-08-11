@@ -35,13 +35,59 @@ discovery:
     const settings = loadAgentSettings({ required: true });
     expect(validateAgentSettings(settings)).toEqual({
       kubeconfigPaths: ['/etc/rancher/k3s/k3s.yaml', '/srv/gateway/production.yaml'],
-      kubeconfigDirectories: ['/srv/gateway/kubeconfigs']
+      kubeconfigDirectories: ['/srv/gateway/kubeconfigs'],
+      metricsExporter: {
+        enabled: false,
+        listenAddress: '127.0.0.1',
+        port: 9464,
+        collectionIntervalSeconds: 60,
+        contexts: [],
+        bearerTokenFile: '',
+        allowInsecureHttp: false,
+        tls: { certFile: '', keyFile: '' }
+      }
     });
     expect(resolveAgentRuntimeConfig({ controlPlaneUrl: 'https://old.invalid', agentId: 'a', agentSecret: 's' })).toMatchObject({
       controlPlaneUrl: 'https://app.kubi.live',
       kubeconfigPath: '/override/kubeconfig'
     });
   }));
+
+  test('requires authentication and transport protection for a remote metrics listener', () => {
+    expect(() => validateAgentSettings({
+      metrics_exporter: {
+        enabled: true,
+        listen_address: '0.0.0.0',
+        bearer_token_file: '/etc/kubi-agent/metrics.token'
+      }
+    })).toThrow('metrics_exporter.tls');
+    expect(() => validateAgentSettings({
+      metrics_exporter: {
+        enabled: true,
+        listen_address: '0.0.0.0',
+        allow_insecure_http: true
+      }
+    })).toThrow('metrics_exporter.bearer_token_file');
+    expect(validateAgentSettings({
+      metrics_exporter: {
+        enabled: true,
+        listen_address: '0.0.0.0',
+        bearer_token_file: '/etc/kubi-agent/metrics.token',
+        tls: {
+          cert_file: '/etc/kubi-agent/tls/metrics.crt',
+          key_file: '/etc/kubi-agent/tls/metrics.key'
+        }
+      }
+    }).metricsExporter).toMatchObject({
+      enabled: true,
+      listenAddress: '0.0.0.0',
+      bearerTokenFile: '/etc/kubi-agent/metrics.token',
+      tls: {
+        certFile: '/etc/kubi-agent/tls/metrics.crt',
+        keyFile: '/etc/kubi-agent/tls/metrics.key'
+      }
+    });
+  });
 
   test('uses the running binary release instead of stale pairing metadata', () => {
     const runtime = resolveAgentRuntimeConfig(

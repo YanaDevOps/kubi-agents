@@ -22,6 +22,7 @@ Agent `v0.1.18` reports Secret usage through Pod and owning Workload metadata wi
 Agent `v0.1.19` detects Loki, Tempo, OpenTelemetry Collector, Fluent Bit, and Fluentd from running workloads and operator CRDs. CRD-only installations are reported as configured rather than active, while canaries, operators, and unrelated labels are excluded from active detection.
 Agent `v0.1.20` bounds control-plane requests, coalesces overlapping heartbeat and discovery work, and makes relay startup and shutdown idempotent. It does not change the runtime API contract.
 Agent `v0.1.21` classifies unused Kubernetes-managed ConfigMaps separately from actionable application ConfigMaps. Standard system namespaces, `kube-root-ca.crt`, and the `kubernetes.io/description` marker are identified without exposing annotation contents; runtime API compatibility remains unchanged.
+Agent `v0.1.22` adds an optional Prometheus pull endpoint for customer-owned dashboards. It is disabled and loopback-only by default, collects every unambiguous discovered context unless restricted, and exports bounded agent state plus aggregate cluster health without per-resource labels.
 
 ## Install
 
@@ -62,5 +63,6 @@ kubi-agent rotate
 - [Configuration and gateway kubeconfigs](docs/configuration.md)
 - [Security model](docs/security.md)
 - [Troubleshooting](docs/troubleshooting.md)
+- [Prometheus metrics](docs/prometheus-metrics.md)
 
 Release tags use `agent-vX.Y.Z`.

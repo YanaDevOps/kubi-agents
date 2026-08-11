@@ -26,3 +26,5 @@ journalctl -u kubi-agent -f
 ```
 
 The host needs outbound HTTPS/WSS on port 443 to `app.kubi.live`, DNS resolution, and network access to every Kubernetes API in the configured kubeconfigs. No inbound agent port is required.
+
+An inbound port is still unnecessary for normal KUBI operation. Agent `v0.1.22+` can optionally open a customer-managed Prometheus endpoint; it remains disabled until configured in `agent.yaml`.

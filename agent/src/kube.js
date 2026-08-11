@@ -4753,6 +4753,154 @@ function metricSample(item, sumContainers) {
   };
 }
 
+function aggregateMetricUsage(items, sumContainers) {
+  let cpuMilli = 0;
+  let memoryBytes = 0;
+  for (const item of asRecordArray(items)) {
+    const samples = sumContainers ? asRecordArray(item.containers) : [item];
+    for (const sample of samples) {
+      const usage = asRecord(sample.usage) || {};
+      cpuMilli += parseMetricCpuMilli(usage.cpu);
+      memoryBytes += parseMemoryBytes(usage.memory);
+    }
+  }
+  return { cpuUsageCores: cpuMilli / 1000, memoryUsageBytes: memoryBytes };
+}
+
+/**
+ * Collects one low-cardinality cluster snapshot for the optional Prometheus exporter.
+ * Resource names never leave this function, keeping the metric label set bounded.
+ */
+export async function loadLocalPrometheusSnapshot(runtimeConfig) {
+  const kubeConfig = loadLocalKubeConfig(runtimeConfig);
+  const requests = await Promise.allSettled([
+    fetchKubeList(kubeConfig, '/api/v1/namespaces'),
+    fetchKubeList(kubeConfig, '/api/v1/nodes'),
+    fetchKubeList(kubeConfig, '/apis/apps/v1/deployments'),
+    fetchKubeList(kubeConfig, '/apis/apps/v1/statefulsets'),
+    fetchKubeList(kubeConfig, '/apis/apps/v1/daemonsets'),
+    fetchKubeList(kubeConfig, '/api/v1/pods'),
+    fetchKubeList(kubeConfig, '/apis/batch/v1/jobs'),
+    fetchKubeList(kubeConfig, '/api/v1/services'),
+    fetchKubeList(kubeConfig, '/apis/discovery.k8s.io/v1/endpointslices'),
+    fetchKubeList(kubeConfig, '/apis/metrics.k8s.io/v1beta1/nodes'),
+    fetchKubeList(kubeConfig, '/apis/metrics.k8s.io/v1beta1/pods')
+  ]);
+  for (const index of [0, 1, 5]) {
+    if (requests[index].status === 'rejected') throw requests[index].reason;
+  }
+
+  const items = (index) => requests[index].status === 'fulfilled' ? requests[index].value.items : [];
+  const nodes = asRecordArray(items(1)).map(normalizeNode);
+  const pods = asRecordArray(items(5)).map(normalizeRuntimePod);
+  const podRecords = asRecordArray(items(5));
+  const workloadGroups = [
+    ['deployment', 'Deployment', 2],
+    ['statefulset', 'StatefulSet', 3],
+    ['daemonset', 'DaemonSet', 4]
+  ];
+  const normalizedWorkloads = Object.fromEntries(workloadGroups.map(([key, kind, index]) => [
+    key,
+    asRecordArray(items(index)).map((record) => normalizeWorkload(kind, record, podRecords, true))
+  ]));
+  const workloads = Object.fromEntries(Object.entries(normalizedWorkloads).map(([key, normalized]) => {
+    return [key, {
+      total: normalized.length,
+      unavailable: normalized.filter((workload) => workload.desired > workload.ready).length
+    }];
+  }));
+
+  const endpointsAvailable = requests[8].status === 'fulfilled';
+  const services = asRecordArray(items(7)).map((service) =>
+    normalizeService(service, asRecordArray(items(8)), endpointsAvailable)
+  );
+  const activePods = pods.filter((pod) => pod.phase !== 'Succeeded');
+  const phases = { running: 0, pending: 0, succeeded: 0, failed: 0, unknown: 0 };
+  for (const pod of pods) {
+    const phase = String(pod.phase || 'Unknown').toLowerCase();
+    phases[Object.hasOwn(phases, phase) ? phase : 'unknown'] += 1;
+  }
+  const fatalReasons = new Set([
+    'CrashLoopBackOff',
+    'ImagePullBackOff',
+    'ErrImagePull',
+    'CreateContainerConfigError',
+    'CreateContainerError',
+    'RunContainerError'
+  ]);
+  const criticalPods = activePods.filter((pod) =>
+    pod.phase === 'Failed' || pod.containers.some((container) => fatalReasons.has(container.reason))
+  ).length;
+  const pressures = nodes.reduce(
+    (total, node) => ({
+      memory: total.memory + Number(node.conditions.memoryPressure),
+      disk: total.disk + Number(node.conditions.diskPressure),
+      pid: total.pid + Number(node.conditions.pidPressure),
+      network: total.network + Number(node.conditions.networkUnavailable)
+    }),
+    { memory: 0, disk: 0, pid: 0, network: 0 }
+  );
+  const metricsAvailable = requests[9].status === 'fulfilled' && requests[10].status === 'fulfilled';
+  const nodeUsage = aggregateMetricUsage(items(9), false);
+  const podUsage = aggregateMetricUsage(items(10), true);
+  const partial = requests.some((request) => request.status === 'rejected') || requests.some(
+    (request) => request.status === 'fulfilled' && request.value.truncated
+  );
+  const failedJobs = asRecordArray(items(6)).filter((job) => jobStatusSummary(job).status === 'Failed').length;
+  const servicesWithoutReadyEndpoints = endpointsAvailable
+    ? services.filter((service) =>
+        Object.keys(service.selector).length > 0 && service.endpointAvailability.status === 'missing'
+      ).length
+    : 0;
+  const unavailableWorkloads = Object.values(workloads).reduce((total, value) => total + value.unavailable, 0);
+  const zeroReadyWorkload = Object.values(normalizedWorkloads).some((group) =>
+    group.some((workload) => workload.desired > 0 && workload.ready === 0)
+  );
+  const critical =
+    nodes.some((node) => !node.ready) ||
+    pressures.memory > 0 ||
+    pressures.disk > 0 ||
+    pressures.pid > 0 ||
+    criticalPods > 0 ||
+    zeroReadyWorkload;
+  const warning =
+    partial ||
+    activePods.some((pod) => !pod.ready) ||
+    unavailableWorkloads > 0 ||
+    failedJobs > 0 ||
+    servicesWithoutReadyEndpoints > 0 ||
+    pressures.network > 0;
+
+  return {
+    namespaces: items(0).length,
+    nodes: {
+      ready: nodes.filter((node) => node.ready).length,
+      notReady: nodes.filter((node) => !node.ready).length,
+      pressures
+    },
+    workloads,
+    pods: {
+      phases,
+      activeReady: activePods.filter((pod) => pod.ready).length,
+      activeNotReady: activePods.filter((pod) => !pod.ready).length,
+      crashLoop: activePods.filter((pod) =>
+        pod.containers.some((container) => container.reason === 'CrashLoopBackOff')
+      ).length
+    },
+    failedJobs,
+    servicesWithoutReadyEndpoints,
+    metrics: {
+      available: metricsAvailable,
+      nodeCpuUsageCores: nodeUsage.cpuUsageCores,
+      nodeMemoryUsageBytes: nodeUsage.memoryUsageBytes,
+      podCpuUsageCores: podUsage.cpuUsageCores,
+      podMemoryUsageBytes: podUsage.memoryUsageBytes
+    },
+    health: critical ? 'critical' : warning ? 'warning' : 'healthy',
+    partial
+  };
+}
+
 export async function loadLocalMetrics(runtimeConfig, namespaceScope = null) {
   const kubeConfig = loadLocalKubeConfig(runtimeConfig);
   const fetchedAt = new Date().toISOString();

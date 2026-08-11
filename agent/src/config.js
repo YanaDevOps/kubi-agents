@@ -68,6 +68,70 @@ function boundedNumber(value, field, fallback, minimum, maximum) {
   return parsed;
 }
 
+function optionalBoolean(value, field, fallback = false) {
+  if (value === undefined) return fallback;
+  if (typeof value !== 'boolean') throw new Error(`${field} must be true or false.`);
+  return value;
+}
+
+function normalizeMetricsExporter(settings) {
+  const exporter = object(settings.metrics_exporter, 'metrics_exporter');
+  const tls = object(exporter.tls, 'metrics_exporter.tls');
+  const enabled = optionalBoolean(exporter.enabled, 'metrics_exporter.enabled');
+  const listenAddress = optionalString(exporter.listen_address, 'metrics_exporter.listen_address', '127.0.0.1') || '127.0.0.1';
+  const port = boundedNumber(exporter.port, 'metrics_exporter.port', 9464, 1, 65535);
+  const collectionIntervalSeconds = boundedNumber(
+    exporter.collection_interval_seconds,
+    'metrics_exporter.collection_interval_seconds',
+    60,
+    15,
+    3600
+  );
+  if (!Number.isInteger(port)) throw new Error('metrics_exporter.port must be an integer.');
+  if (!Number.isInteger(collectionIntervalSeconds)) {
+    throw new Error('metrics_exporter.collection_interval_seconds must be an integer.');
+  }
+  const contexts = strings(exporter.contexts, 'metrics_exporter.contexts');
+  if (new Set(contexts).size !== contexts.length) {
+    throw new Error('metrics_exporter.contexts must not contain duplicates.');
+  }
+  const bearerTokenFile = optionalString(exporter.bearer_token_file, 'metrics_exporter.bearer_token_file');
+  const allowInsecureHttp = optionalBoolean(
+    exporter.allow_insecure_http,
+    'metrics_exporter.allow_insecure_http'
+  );
+  const certFile = optionalString(tls.cert_file, 'metrics_exporter.tls.cert_file');
+  const keyFile = optionalString(tls.key_file, 'metrics_exporter.tls.key_file');
+  if (Boolean(certFile) !== Boolean(keyFile)) {
+    throw new Error('metrics_exporter.tls.cert_file and metrics_exporter.tls.key_file must be configured together.');
+  }
+
+  const normalizedAddress = listenAddress.replace(/^\[|\]$/g, '').toLowerCase();
+  const loopback =
+    normalizedAddress === 'localhost' ||
+    normalizedAddress === '::1' ||
+    normalizedAddress.startsWith('127.');
+  if (enabled && !loopback && !bearerTokenFile) {
+    throw new Error('metrics_exporter.bearer_token_file is required for a non-loopback listen address.');
+  }
+  if (enabled && !loopback && !certFile && !allowInsecureHttp) {
+    throw new Error(
+      'metrics_exporter.tls is required for a non-loopback listen address unless allow_insecure_http is true.'
+    );
+  }
+
+  return {
+    enabled,
+    listenAddress,
+    port,
+    collectionIntervalSeconds,
+    contexts,
+    bearerTokenFile,
+    allowInsecureHttp,
+    tls: { certFile, keyFile }
+  };
+}
+
 function normalizeVitastorProfiles(settings) {
   const storage = object(settings.storage, 'storage');
   const drivers = object(storage.drivers, 'storage.drivers');
@@ -155,9 +219,11 @@ export function validateAgentSettings(settings) {
     throw new Error('logging.file.path must be a non-empty path.');
   }
   const storageDrivers = normalizeVitastorProfiles(settings);
+  const metricsExporter = normalizeMetricsExporter(settings);
   return {
     kubeconfigPaths,
     kubeconfigDirectories,
+    metricsExporter,
     ...(storageDrivers ? { storageDrivers } : {})
   };
 }
@@ -200,6 +266,7 @@ export function resolveAgentRuntimeConfig(config, runningRelease = {}) {
     alertingConfigPath: process.env.KUBI_AGENT_ALERTING_CONFIG || config.alertingConfigPath || null,
     alertingHistoryPath: process.env.KUBI_AGENT_ALERTING_HISTORY || config.alertingHistoryPath || null,
     logging: settings.logging && typeof settings.logging === 'object' ? settings.logging : {},
+    metricsExporter: validated.metricsExporter,
     storageDrivers: validated.storageDrivers || {}
   };
 }

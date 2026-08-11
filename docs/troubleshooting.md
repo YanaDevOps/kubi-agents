@@ -61,3 +61,7 @@ The agent uses bounded requests for registration, heartbeats, discovery sync, an
 ## Update Required
 
 The installed binary is below the minimum hosted version or reports development build metadata. Download the current binary from the latest GitHub Release, replace it, verify `kubi-agent version`, and restart the service.
+
+## Prometheus Endpoint Is Unavailable
+
+Prometheus export requires agent `v0.1.22+` and `metrics_exporter.enabled: true`. Run `kubi-agent config validate`, restart the service, and check `journalctl -u kubi-agent`. Local mode listens on `127.0.0.1:9464`; Prometheus must run on the same host unless a secure remote listener is configured. A remote listener requires a mode-`0600` bearer-token file and TLS unless `allow_insecure_http: true` is explicitly set.
