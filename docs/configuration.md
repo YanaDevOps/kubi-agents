@@ -36,11 +36,17 @@ logging:
   #   max_size_mb: 10
   #   max_files: 5
 
-# Optional deep Vitastor metrics. Credentials stay on this host.
-# storage:
-#   drivers:
-#     vitastor:
-#       profiles:
+# Optional deep Vitastor metrics. CLI auto-detection is read-only and enabled by default.
+storage:
+  drivers:
+    vitastor:
+      cli:
+        enabled: true
+        path: vitastor-cli
+        timeout_seconds: 8
+        # config_path: /etc/vitastor/vitastor.conf
+      profiles: []
+#     profiles:
 #         - context: "*"
 #           # cluster_fingerprint: "<preferred stable selector>"
 #           endpoints:
@@ -81,10 +87,14 @@ By default systemd captures stdout/stderr in journald. Optional file output uses
 
 KUBI always derives generic CSI driver, StorageClass, PV, and PVC inventory from the Kubernetes API. Deep provider metrics are optional and run only inside the customer-side agent.
 
-For Vitastor, the agent checks profiles by exact `cluster_fingerprint`, exact kubeconfig `context`, then wildcard context `*`. Without a profile, it searches readable StorageClasses, ConfigMaps, Services, and EndpointSlices for an etcd v3 HTTP gateway endpoint.
+For Vitastor, a single-context node or gateway first runs only `vitastor-cli status --json`, `vitastor-cli pools --json`, and `vitastor-cli osds --json`. Commands run without a shell and have bounded runtime and output. They follow the host's current Vitastor configuration, so endpoint address changes do not require a KUBI configuration change.
+
+On a multi-context gateway, local CLI collection requires an exact `cluster_fingerprint` or kubeconfig `context` profile. This prevents host-local metrics from being attributed to another context. Wildcard profiles remain valid for direct etcd fallback but do not authorize ambiguous CLI attribution.
+
+If CLI collection is unavailable, the agent checks profiles by exact `cluster_fingerprint`, exact kubeconfig `context`, then wildcard context `*`. It tries configured endpoints first and then fresh endpoints from readable StorageClasses, ConfigMaps, Services, and EndpointSlices. A stale failed endpoint does not block later candidates.
 
 If auto-discovery is incomplete, configure `endpoints` explicitly. The endpoint must already be reachable from the agent host and expose `/v3/kv/range`; KUBI does not create a tunnel or modify Vitastor.
 
 Use a read-only etcd account where authentication is enabled. TLS settings are file paths, not inline certificate data. Agent configuration is installed with mode `0600`; `kubi-agent config show --effective` redacts passwords, bearer tokens, custom metric headers, and the pairing identity secret.
 
-Supported metric authentication modes are `none`, `basic`, `bearer`, and `headers`. Providers other than Vitastor currently show Kubernetes inventory and an explicit message that deep provider metrics are unavailable rather than returning an error.
+`StorageClass.parameters.poolId` may provide a configured pool count when deep metrics are unavailable, but StorageClass data is never presented as capacity. Supported metric authentication modes are `none`, `basic`, `bearer`, and `headers`. Providers other than Vitastor currently show Kubernetes inventory and an explicit message that deep provider metrics are unavailable rather than returning an error.

@@ -22,7 +22,7 @@ Domain Health reads cert-manager `certificates`, `orders`, and `challenges` when
 
 Gateway API validation reads only installed Gateway API custom resources, Service summaries, and endpoint readiness already available through the selected kubeconfig. It does not mutate routes, call backend workloads, or execute server-side authorization probes.
 
-Deep storage driver queries run on the agent host. Vitastor credentials and TLS file paths stay in `/etc/kubi-agent/agent.yaml`, are never sent to SaaS, and are redacted from effective-config output and logs. Use a read-only etcd account and restrict the configuration file to the service account.
+Deep storage driver queries run on the agent host. For Vitastor, CLI collection is restricted to three fixed read-only JSON commands, uses no shell, and has bounded time and output. Vitastor credentials and TLS file paths stay in `/etc/kubi-agent/agent.yaml`, are never sent to SaaS, and are redacted from effective-config output and logs. Use a read-only etcd account and restrict the configuration file to the service account.
 
 ## Backup Discovery
 

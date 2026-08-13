@@ -3,6 +3,38 @@ import http from 'node:http';
 import { loadLocalStorageDriverOverview } from '../agent/src/storage-drivers.js';
 
 describe('agent storage driver metrics', () => {
+  test('prefers bounded Vitastor CLI JSON and exposes its source', async () => {
+    const payloads = {
+      status: {
+        etcd_alive: 3, etcd_count: 3, mon_count: 3, osd_up: 3, osd_count: 3,
+        active_pool_count: 1, pool_count: 1, total_raw: 6000, free_raw: 6000,
+        clean_data: 0, degraded_data: 0, incomplete_data: 0, misplaced_data: 0,
+        op_stats: { read: { count: 12 }, write: { count: 7 } }
+      },
+      pools: [{ id: 1, name: 'data', status: 'active', total_raw: 6000, used_raw: 0, max_available: 2000, raw_to_usable: 3 }],
+      osds: [
+        { name: 1, parent: 'node-a', up: true, size: 2000, free: 2000 },
+        { name: 2, parent: 'node-b', up: true, size: 2000, free: 2000 },
+        { name: 3, parent: 'node-c', up: true, size: 2000, free: 2000 }
+      ]
+    };
+    const overview = await loadLocalStorageDriverOverview({
+      kubeContext: 'default',
+      discoveredContextCount: 1,
+      storageDrivers: { vitastor: { cli: { enabled: true, path: 'vitastor-cli' }, profiles: [] } }
+    }, { driver: 'csi.vitastor.io' }, {
+      execFile: async (_command, args) => JSON.stringify(payloads[args[0]])
+    });
+
+    expect(overview.driver).toMatchObject({ status: 'healthy', metricsSource: 'vitastor-cli' });
+    expect(overview.summary).toMatchObject({
+      osd: { up: 3, total: 3 },
+      pools: 1,
+      capacity: { usedBytes: 0, totalBytes: 2000 },
+      rawCapacity: { usedBytes: 0, totalBytes: 6000 }
+    });
+  });
+
   test('loads Vitastor OSD, pool, capacity, and IO data through the etcd v3 gateway', async () => {
     const records = [
       ['/vitastor/osd/state/1', { state: 'up' }],
@@ -38,6 +70,7 @@ describe('agent storage driver metrics', () => {
         },
         storageDrivers: {
           vitastor: {
+            cli: { enabled: false },
             profiles: [{
               context: '*',
               endpoints: [endpoint],

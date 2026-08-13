@@ -23,6 +23,7 @@ Agent `v0.1.19` detects Loki, Tempo, OpenTelemetry Collector, Fluent Bit, and Fl
 Agent `v0.1.20` bounds control-plane requests, coalesces overlapping heartbeat and discovery work, and makes relay startup and shutdown idempotent. It does not change the runtime API contract.
 Agent `v0.1.21` classifies unused Kubernetes-managed ConfigMaps separately from actionable application ConfigMaps. Standard system namespaces, `kube-root-ca.crt`, and the `kubernetes.io/description` marker are identified without exposing annotation contents; runtime API compatibility remains unchanged.
 Agent `v0.1.22` adds an optional Prometheus pull endpoint for customer-owned dashboards. It is disabled and loopback-only by default, collects every unambiguous discovered context unless restricted, and exports bounded agent state plus aggregate cluster health without per-resource labels.
+Agent `v0.1.23` adds CLI-first Vitastor metrics through bounded read-only `status`, `pools`, and `osds` JSON commands. Direct etcd remains a fallback, and KUBI reports usable pool capacity separately from raw OSD capacity.
 
 ## Install
 

@@ -95,10 +95,16 @@ metrics_exporter:
   #   key_file: /etc/kubi-agent/tls/metrics.key
 
 # Optional deep storage metrics. Kubernetes storage inventory works without this.
-# Add a profile only when Vitastor etcd endpoints cannot be discovered from cluster metadata.
+# The agent automatically uses read-only vitastor-cli JSON commands on a single-context host.
+# Add an exact context profile on multi-context gateways or when direct etcd is required.
 storage:
   drivers:
     vitastor:
+      cli:
+        enabled: true
+        path: vitastor-cli
+        timeout_seconds: 8
+        # config_path: /etc/vitastor/vitastor.conf
       profiles: []
       # profiles:
       #   - context: production

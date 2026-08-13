@@ -136,12 +136,12 @@ function normalizeVitastorProfiles(settings) {
   const storage = object(settings.storage, 'storage');
   const drivers = object(storage.drivers, 'storage.drivers');
   const vitastor = object(drivers.vitastor, 'storage.drivers.vitastor');
-  if (vitastor.profiles === undefined) return null;
-  if (!Array.isArray(vitastor.profiles)) {
+  const cli = object(vitastor.cli, 'storage.drivers.vitastor.cli');
+  if (vitastor.profiles !== undefined && !Array.isArray(vitastor.profiles)) {
     throw new Error('storage.drivers.vitastor.profiles must be a list.');
   }
 
-  const profiles = vitastor.profiles.map((raw, index) => {
+  const profiles = (vitastor.profiles || []).map((raw, index) => {
     const field = `storage.drivers.vitastor.profiles[${index}]`;
     const profile = object(raw, field);
     const auth = object(profile.auth, `${field}.auth`);
@@ -200,7 +200,23 @@ function normalizeVitastorProfiles(settings) {
     }
     selectors.add(selector);
   }
-  return { vitastor: { profiles } };
+  return {
+    vitastor: {
+      cli: {
+        enabled: optionalBoolean(cli.enabled, 'storage.drivers.vitastor.cli.enabled', true),
+        path: optionalString(cli.path, 'storage.drivers.vitastor.cli.path', 'vitastor-cli') || 'vitastor-cli',
+        configPath: optionalString(cli.config_path, 'storage.drivers.vitastor.cli.config_path'),
+        timeoutSeconds: boundedNumber(
+          cli.timeout_seconds,
+          'storage.drivers.vitastor.cli.timeout_seconds',
+          8,
+          1,
+          60
+        )
+      },
+      profiles
+    }
+  };
 }
 
 export function validateAgentSettings(settings) {

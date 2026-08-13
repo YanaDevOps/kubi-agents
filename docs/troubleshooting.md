@@ -44,6 +44,12 @@ Update to agent `v0.1.13` or newer, then restart the service. Older agents do no
 
 Agent `v0.1.8` and newer use the Kubernetes API `nodes/proxy` subresource to read kubelet volume summaries. This permission is optional. Without it, requested capacity and storage inventory still work, but used bytes are shown as unavailable. Grant `get` on `nodes/proxy` only when that additional read is acceptable for your cluster policy.
 
+## Vitastor Metrics Show an Old or Refused Endpoint
+
+Agent `v0.1.23+` prefers the local `vitastor-cli` configuration on a single-context host. Verify it with `vitastor-cli status --json`, then use **Storage → Driver metrics → Refresh driver data**. The UI shows which source produced the data.
+
+If the source is configured etcd, update `storage.drivers.vitastor.profiles[].endpoints` in `/etc/kubi-agent/agent.yaml` and restart the service. If the source is Kubernetes discovery, inspect the `etcdUrl` parameter in the Vitastor StorageClass. KUBI never mutates that object. A stale endpoint is skipped in favor of later configured or discovered candidates, but it remains visible as partial diagnostic evidence.
+
 ## Certificate Details Are Unavailable
 
 Agent `v0.1.14` and newer read cert-manager Certificate, Order, and Challenge status for Domain Health. If ingress hosts are visible but certificate details are missing, confirm cert-manager is installed and the agent kubeconfig can list `certificates.cert-manager.io`, `orders.acme.cert-manager.io`, and `challenges.acme.cert-manager.io`. TLS Secret contents are not required.

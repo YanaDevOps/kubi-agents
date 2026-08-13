@@ -1,7 +1,10 @@
 import fs from 'node:fs';
 import http from 'node:http';
 import https from 'node:https';
-import { fetchKubeList, loadLocalKubeConfig, metadataFor } from './kube.js';
+import { execFile as nodeExecFile } from 'node:child_process';
+import { discoverLocalAccessCandidates, fetchKubeList, loadLocalKubeConfig, metadataFor } from './kube.js';
+
+const CLI_MAX_OUTPUT_BYTES = 4 * 1024 * 1024;
 
 function emptyResourceList(items, fetchedAt, errors = []) {
   return {
@@ -48,7 +51,8 @@ function emptyDriverSummary(driver, fetchedAt, message, errors = []) {
       monitors: { up: 0, total: 0 },
       osd: { up: 0, total: 0 },
       pools: 0,
-      capacity: { usedBytes: 0, totalBytes: 0 }
+      capacity: { usedBytes: 0, totalBytes: 0 },
+      rawCapacity: { usedBytes: 0, totalBytes: 0 }
     },
     dataState: { clean: 0, degraded: 0, incomplete: 0, misplaced: 0 },
     io: { readOps: 0, writeOps: 0 },
@@ -60,6 +64,28 @@ function emptyDriverSummary(driver, fetchedAt, message, errors = []) {
     message,
     errors
   };
+}
+
+function executeFile(command, args, options = {}) {
+  return new Promise((resolve, reject) => {
+    nodeExecFile(
+      command,
+      args,
+      {
+        timeout: Math.max(1, Number(options.timeoutSeconds) || 8) * 1000,
+        maxBuffer: CLI_MAX_OUTPUT_BYTES,
+        windowsHide: true,
+        shell: false,
+      },
+      (error, stdout) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve(String(stdout || ''));
+      }
+    );
+  });
 }
 
 function safeError(error) {
@@ -181,6 +207,150 @@ function numeric(value) {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function parseCliJson(output, command) {
+  try {
+    return JSON.parse(String(output || ''));
+  } catch {
+    throw new Error(`vitastor-cli ${command} returned invalid JSON.`);
+  }
+}
+
+function vitastorCliArgs(command, configPath) {
+  const args = [command, '--json'];
+  if (configPath) args.push('--config_path', configPath);
+  return args;
+}
+
+function exactProfileSelected(profile, runtimeConfig) {
+  if (!profile) return false;
+  if (profile.clusterFingerprint) {
+    return profile.clusterFingerprint === runtimeConfig.clusterFingerprint;
+  }
+  return Boolean(profile.context && profile.context !== '*' && profile.context === runtimeConfig.kubeContext);
+}
+
+function canUseLocalVitastorCli(runtimeConfig, profile) {
+  if (exactProfileSelected(profile, runtimeConfig)) return true;
+  if (Number.isFinite(runtimeConfig.discoveredContextCount)) {
+    return runtimeConfig.discoveredContextCount <= 1;
+  }
+  try {
+    return discoverLocalAccessCandidates(runtimeConfig).length <= 1;
+  } catch {
+    return false;
+  }
+}
+
+async function loadVitastorCliOverview(runtimeConfig, profile, fetchedAt, execFile) {
+  const cli = {
+    enabled: true,
+    path: 'vitastor-cli',
+    configPath: '',
+    timeoutSeconds: 8,
+    ...(runtimeConfig.storageDrivers?.vitastor?.cli || {})
+  };
+  if (!cli.enabled || !canUseLocalVitastorCli(runtimeConfig, profile)) return null;
+
+  const run = async (command) => parseCliJson(
+    await execFile(cli.path, vitastorCliArgs(command, cli.configPath), {
+      timeoutSeconds: cli.timeoutSeconds,
+      maxOutputBytes: CLI_MAX_OUTPUT_BYTES
+    }),
+    command
+  );
+  const status = await run('status');
+  const poolsPayload = await run('pools');
+  const osdsPayload = await run('osds');
+  if (!status || typeof status !== 'object' || Array.isArray(status)) {
+    throw new Error('vitastor-cli status returned an invalid object.');
+  }
+  const poolsInput = Array.isArray(poolsPayload) ? poolsPayload : [];
+  const osdsInput = Array.isArray(osdsPayload) ? osdsPayload : [];
+  const pools = poolsInput.map((pool) => {
+    const rawToUsable = Math.max(1, numeric(pool.raw_to_usable));
+    const usedBytes = numeric(pool.used_raw) / rawToUsable;
+    const availableBytes = numeric(pool.max_available);
+    return {
+      name: String(pool.name || pool.id || 'unknown'),
+      status: String(pool.status || 'unknown'),
+      usedBytes,
+      totalBytes: usedBytes + availableBytes,
+      objects: numeric(pool.object_count)
+    };
+  });
+  const osds = osdsInput.map((osd) => ({
+    name: String(osd.name ?? osd.id ?? 'unknown'),
+    status: osd.up === true ? 'up' : 'down',
+    node: osd.parent || osd.node || osd.host,
+    usedBytes: Math.max(0, numeric(osd.size) - numeric(osd.free)),
+    totalBytes: numeric(osd.size)
+  }));
+  const poolUsedBytes = pools.reduce((sum, pool) => sum + pool.usedBytes, 0);
+  const poolTotalBytes = pools.reduce((sum, pool) => sum + pool.totalBytes, 0);
+  const rawTotalBytes = numeric(status.total_raw);
+  const rawUsedBytes = Math.max(0, rawTotalBytes - numeric(status.free_raw));
+  const osdTotal = numeric(status.osd_count) || osds.length;
+  const osdUp = numeric(status.osd_up) || osds.filter((osd) => osd.status === 'up').length;
+  const poolTotal = numeric(status.pool_count) || pools.length;
+  const activePools = numeric(status.active_pool_count);
+  const degraded = numeric(status.degraded_data);
+  const incomplete = numeric(status.incomplete_data);
+  const misplaced = numeric(status.misplaced_data);
+  const etcdUnhealthy = numeric(status.etcd_count) > 0 && numeric(status.etcd_alive) < numeric(status.etcd_count);
+  const osdUnhealthy = osdTotal > 0 && osdUp < osdTotal;
+  const poolUnhealthy = poolTotal > 0 && activePools < poolTotal;
+  const driverStatus = incomplete > 0 || osdUnhealthy
+    ? 'critical'
+    : degraded > 0 || misplaced > 0 || etcdUnhealthy || poolUnhealthy
+      ? 'warning'
+      : 'healthy';
+  const opStats = status.op_stats && typeof status.op_stats === 'object' ? status.op_stats : {};
+
+  return {
+    namespaceScope: null,
+    fetchedAt,
+    issues: [],
+    partial: false,
+    availability: 'available',
+    availableDrivers: [],
+    driver: {
+      name: 'Vitastor',
+      providerId: 'csi.vitastor.io',
+      type: 'csi',
+      status: driverStatus,
+      lastUpdate: fetchedAt,
+      metricsSource: 'vitastor-cli',
+      metricsSourceDetail: cli.path,
+      features: { runtimeOverview: true, autoDiscovery: true, manualConfig: true }
+    },
+    summary: {
+      monitors: { up: numeric(status.mon_count), total: numeric(status.mon_count) },
+      osd: { up: osdUp, total: osdTotal },
+      pools: poolTotal,
+      poolCountSource: 'vitastor-cli status',
+      capacity: { usedBytes: poolUsedBytes, totalBytes: poolTotalBytes },
+      rawCapacity: { usedBytes: rawUsedBytes, totalBytes: rawTotalBytes }
+    },
+    dataState: {
+      clean: numeric(status.clean_data),
+      degraded,
+      incomplete,
+      misplaced
+    },
+    io: {
+      readOps: numeric(opStats.read?.count ?? opStats.read),
+      writeOps: numeric(opStats.write?.count ?? opStats.write)
+    },
+    details: {
+      monitors: emptyResourceList([], fetchedAt),
+      osds: emptyResourceList(osds, fetchedAt),
+      pools: emptyResourceList(pools, fetchedAt)
+    },
+    message: 'Vitastor metrics loaded through the local read-only CLI.',
+    errors: []
+  };
 }
 
 function metricHeaders(auth = {}) {
@@ -349,10 +519,29 @@ async function discoverVitastorConfig(runtimeConfig) {
   const text = discoveryText(records);
   const endpoints = extractEndpointCandidates(text).filter((value) => !/:2380(?:\/|$)/.test(value));
   const prefixMatch = text.match(/(?:etcd[_-]?prefix|prefix)["':=\s]+(\/[A-Za-z0-9_.-]+)/i);
+  const poolIds = unique(
+    records
+      .filter((record) => /vitastor/i.test(String(record.provisioner || '')))
+      .map((record) => String(record.parameters?.poolId || record.parameters?.pool_id || '').trim())
+  );
   return {
     endpoints,
     prefix: prefixMatch?.[1] || '/vitastor',
+    poolIds,
     evidence: endpoints.length > 0 ? ['Kubernetes StorageClass/ConfigMap/Service metadata'] : []
+  };
+}
+
+function applyDiscoveredPoolCount(summary, discovered) {
+  const poolIds = discovered?.poolIds || [];
+  if (summary.summary.pools > 0 || poolIds.length === 0) return summary;
+  return {
+    ...summary,
+    summary: {
+      ...summary.summary,
+      pools: poolIds.length,
+      poolCountSource: 'Kubernetes StorageClass parameters'
+    }
   };
 }
 
@@ -385,7 +574,7 @@ function defaultVitastorConfig() {
   };
 }
 
-export async function loadLocalStorageDriverOverview(runtimeConfig, input = {}) {
+export async function loadLocalStorageDriverOverview(runtimeConfig, input = {}, dependencies = {}) {
   const fetchedAt = new Date().toISOString();
   const driver = String(input.driver || '').trim();
   if (!driver) return emptyDriverSummary('Unknown', fetchedAt, 'Select a storage driver.');
@@ -398,19 +587,32 @@ export async function loadLocalStorageDriverOverview(runtimeConfig, input = {}) 
   }
 
   const configured = selectVitastorProfile(runtimeConfig);
-  const discovered = await discoverVitastorConfig(runtimeConfig).catch(() => ({ endpoints: [], prefix: '/vitastor', evidence: [] }));
+  let cliError = '';
+  try {
+    const cliOverview = await loadVitastorCliOverview(
+      runtimeConfig,
+      configured,
+      fetchedAt,
+      dependencies.execFile || executeFile
+    );
+    if (cliOverview) return cliOverview;
+  } catch (error) {
+    cliError = safeError(error);
+  }
+  const discovered = await discoverVitastorConfig(runtimeConfig).catch(() => ({ endpoints: [], prefix: '/vitastor', poolIds: [], evidence: [] }));
   const config = {
     ...defaultVitastorConfig(),
     ...(configured || {}),
-    endpoints: unique((configured?.endpoints?.length ? configured.endpoints : discovered.endpoints).map((value) => withScheme(value, configured?.scheme || 'http'))),
+    endpoints: unique([...(configured?.endpoints || []), ...discovered.endpoints].map((value) => withScheme(value, configured?.scheme || 'http'))),
     prefix: configured?.prefix || discovered.prefix || '/vitastor'
   };
   if (config.endpoints.length === 0) {
-    return emptyDriverSummary(
+    return applyDiscoveredPoolCount(emptyDriverSummary(
       'Vitastor',
       fetchedAt,
-      'Vitastor detected, but no etcd endpoints were discovered. Configure them in /etc/kubi-agent/agent.yaml.'
-    );
+      'Vitastor detected, but neither the local CLI nor an etcd endpoint was available.',
+      cliError ? [cliError] : []
+    ), discovered);
   }
 
   const errors = [];
@@ -424,12 +626,12 @@ export async function loadLocalStorageDriverOverview(runtimeConfig, input = {}) 
     }
   }
   if (entries.length === 0) {
-    return emptyDriverSummary(
+    return applyDiscoveredPoolCount(emptyDriverSummary(
       'Vitastor',
       fetchedAt,
       'Vitastor detected. Driver metrics are unavailable; check etcd connectivity from the agent host.',
-      errors.length > 0 ? errors : ['No Vitastor keys were returned by the configured endpoints.']
-    );
+      [...(cliError ? [cliError] : []), ...(errors.length > 0 ? errors : ['No Vitastor keys were returned by the configured endpoints.'])]
+    ), discovered);
   }
 
   const master = entries.find((entry) => entry.key.endsWith('/mon/master'));
@@ -481,13 +683,17 @@ export async function loadLocalStorageDriverOverview(runtimeConfig, input = {}) 
       type: 'csi',
       status,
       lastUpdate: fetchedAt,
+      metricsSource: configured ? 'configured-etcd' : 'kubernetes-discovery',
+      metricsSourceDetail: config.endpoints[0] ? new URL(config.endpoints[0]).host : undefined,
       features: { runtimeOverview: true, autoDiscovery: true, manualConfig: true }
     },
     summary: {
       monitors: { up: monitorUp, total: monitors.length },
       osd: { up: osdUp, total: osds.length },
-      pools: pools.length,
-      capacity: { usedBytes, totalBytes }
+      pools: pools.length || discovered.poolIds.length,
+      capacity: { usedBytes, totalBytes },
+      rawCapacity: { usedBytes: 0, totalBytes: 0 },
+      poolCountSource: pools.length > 0 ? 'vitastor etcd' : 'Kubernetes StorageClass parameters'
     },
     dataState,
     io: { readOps: metrics.readOps, writeOps: metrics.writeOps },

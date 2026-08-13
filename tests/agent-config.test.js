@@ -45,6 +45,17 @@ discovery:
         bearerTokenFile: '',
         allowInsecureHttp: false,
         tls: { certFile: '', keyFile: '' }
+      },
+      storageDrivers: {
+        vitastor: {
+          cli: {
+            enabled: true,
+            path: 'vitastor-cli',
+            configPath: '',
+            timeoutSeconds: 8
+          },
+          profiles: []
+        }
       }
     });
     expect(resolveAgentRuntimeConfig({ controlPlaneUrl: 'https://old.invalid', agentId: 'a', agentSecret: 's' })).toMatchObject({
@@ -113,6 +124,12 @@ discovery:
       storage: {
         drivers: {
           vitastor: {
+            cli: {
+              enabled: true,
+              path: '/usr/bin/vitastor-cli',
+              config_path: '/etc/vitastor/vitastor.conf',
+              timeout_seconds: 12
+            },
             profiles: [{
               context: '*',
               endpoints: ['http://10.10.8.201:12379'],
@@ -128,6 +145,12 @@ discovery:
       }
     });
 
+    expect(validated.storageDrivers.vitastor.cli).toEqual({
+      enabled: true,
+      path: '/usr/bin/vitastor-cli',
+      configPath: '/etc/vitastor/vitastor.conf',
+      timeoutSeconds: 12
+    });
     expect(validated.storageDrivers.vitastor.profiles[0]).toMatchObject({
       context: '*',
       endpoints: ['http://10.10.8.201:12379'],
