@@ -24,6 +24,7 @@ Agent `v0.1.20` bounds control-plane requests, coalesces overlapping heartbeat a
 Agent `v0.1.21` classifies unused Kubernetes-managed ConfigMaps separately from actionable application ConfigMaps. Standard system namespaces, `kube-root-ca.crt`, and the `kubernetes.io/description` marker are identified without exposing annotation contents; runtime API compatibility remains unchanged.
 Agent `v0.1.22` adds an optional Prometheus pull endpoint for customer-owned dashboards. It is disabled and loopback-only by default, collects every unambiguous discovered context unless restricted, and exports bounded agent state plus aggregate cluster health without per-resource labels.
 Agent `v0.1.23` adds CLI-first Vitastor metrics through bounded read-only `status`, `pools`, and `osds` JSON commands. Direct etcd remains a fallback, and KUBI reports usable pool capacity separately from raw OSD capacity.
+Agent `v0.1.24` restores per-monitor Vitastor inventory by enriching healthy CLI metrics with best-effort etcd monitor metadata without degrading OSD, pool, or capacity data when enrichment is unavailable.
 
 ## Install
 

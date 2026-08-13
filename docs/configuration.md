@@ -89,6 +89,8 @@ KUBI always derives generic CSI driver, StorageClass, PV, and PVC inventory from
 
 For Vitastor, a single-context node or gateway first runs only `vitastor-cli status --json`, `vitastor-cli pools --json`, and `vitastor-cli osds --json`. Commands run without a shell and have bounded runtime and output. They follow the host's current Vitastor configuration, so endpoint address changes do not require a KUBI configuration change.
 
+Agent `v0.1.24+` also performs a best-effort etcd read for monitor membership after successful CLI collection. This supplies monitor names, roles, health, and addresses. Failure to enrich monitor details does not downgrade the CLI-backed driver response.
+
 On a multi-context gateway, local CLI collection requires an exact `cluster_fingerprint` or kubeconfig `context` profile. This prevents host-local metrics from being attributed to another context. Wildcard profiles remain valid for direct etcd fallback but do not authorize ambiguous CLI attribution.
 
 If CLI collection is unavailable, the agent checks profiles by exact `cluster_fingerprint`, exact kubeconfig `context`, then wildcard context `*`. It tries configured endpoints first and then fresh endpoints from readable StorageClasses, ConfigMaps, Services, and EndpointSlices. A stale failed endpoint does not block later candidates.

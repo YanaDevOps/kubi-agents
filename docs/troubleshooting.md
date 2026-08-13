@@ -46,7 +46,7 @@ Agent `v0.1.8` and newer use the Kubernetes API `nodes/proxy` subresource to rea
 
 ## Vitastor Metrics Show an Old or Refused Endpoint
 
-Agent `v0.1.23+` prefers the local `vitastor-cli` configuration on a single-context host. Verify it with `vitastor-cli status --json`, then use **Storage → Driver metrics → Refresh driver data**. The UI shows which source produced the data.
+Agent `v0.1.24+` prefers the local `vitastor-cli` configuration on a single-context host and enriches monitor membership through best-effort etcd reads. Verify it with `vitastor-cli status --json`, then use **Storage → Driver metrics → Refresh driver data**. The UI shows which source produced the data.
 
 If the source is configured etcd, update `storage.drivers.vitastor.profiles[].endpoints` in `/etc/kubi-agent/agent.yaml` and restart the service. If the source is Kubernetes discovery, inspect the `etcdUrl` parameter in the Vitastor StorageClass. KUBI never mutates that object. A stale endpoint is skipped in favor of later configured or discovered candidates, but it remains visible as partial diagnostic evidence.
 

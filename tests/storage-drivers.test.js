@@ -23,16 +23,83 @@ describe('agent storage driver metrics', () => {
       discoveredContextCount: 1,
       storageDrivers: { vitastor: { cli: { enabled: true, path: 'vitastor-cli' }, profiles: [] } }
     }, { driver: 'csi.vitastor.io' }, {
-      execFile: async (_command, args) => JSON.stringify(payloads[args[0]])
+      execFile: async (_command, args) => JSON.stringify(payloads[args[0]]),
+      discoverVitastorConfig: async () => ({ endpoints: [], prefix: '/vitastor', poolIds: [], evidence: [] })
     });
 
     expect(overview.driver).toMatchObject({ status: 'healthy', metricsSource: 'vitastor-cli' });
     expect(overview.summary).toMatchObject({
+      monitors: { up: 3, total: 3 },
       osd: { up: 3, total: 3 },
       pools: 1,
       capacity: { usedBytes: 0, totalBytes: 2000 },
       rawCapacity: { usedBytes: 0, totalBytes: 6000 }
     });
+    expect(overview.details.monitors.items).toEqual([]);
+    expect(overview.errors).toEqual([]);
+  });
+
+  test('enriches CLI metrics with per-monitor inventory from etcd', async () => {
+    const records = [
+      ['/vitastor/mon/master', { id: 'mon-a' }],
+      ['/vitastor/mon/member/mon-a', { hostname: 'mon-a', ip: ['127.0.0.1'] }],
+      ['/vitastor/mon/member/mon-b', { hostname: 'mon-b', ip: ['127.0.0.2'] }]
+    ];
+    const server = http.createServer((request, response) => {
+      if (request.method === 'POST' && request.url === '/v3/kv/range') {
+        response.writeHead(200, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({
+          kvs: records.map(([key, value]) => ({
+            key: Buffer.from(String(key)).toString('base64'),
+            value: Buffer.from(JSON.stringify(value)).toString('base64')
+          }))
+        }));
+        return;
+      }
+      response.writeHead(404);
+      response.end();
+    });
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    if (!address || typeof address === 'string') throw new Error('Test server did not start.');
+    const endpoint = `http://127.0.0.1:${address.port}`;
+    const payloads = {
+      status: { etcd_alive: 2, etcd_count: 2, mon_count: 2, osd_up: 1, osd_count: 1, active_pool_count: 1, pool_count: 1 },
+      pools: [{ id: 1, name: 'data', status: 'active', max_available: 1024, used_raw: 0 }],
+      osds: [{ name: 1, parent: 'node-a', up: true, size: 1024, free: 1024 }]
+    };
+
+    try {
+      const overview = await loadLocalStorageDriverOverview({
+        kubeContext: 'default',
+        discoveredContextCount: 1,
+        storageDrivers: {
+          vitastor: {
+            cli: { enabled: true, path: 'vitastor-cli' },
+            profiles: [{
+              context: '*', endpoints: [endpoint], prefix: '/vitastor', scheme: 'http', timeoutSeconds: 1,
+              osdStaleSeconds: 30, auth: { username: '', password: '' }, tls: { caFile: '', certFile: '', keyFile: '' },
+              metrics: { scheme: 'http', timeoutSeconds: 1, auth: { mode: 'none', username: '', password: '', bearerToken: '', headers: {} } }
+            }]
+          }
+        }
+      }, { driver: 'csi.vitastor.io' }, {
+        execFile: async (_command, args) => JSON.stringify(payloads[args[0]]),
+        discoverVitastorConfig: async () => ({ endpoints: [], prefix: '/vitastor', poolIds: [], evidence: [] })
+      });
+
+      expect(overview.driver.metricsSource).toBe('vitastor-cli');
+      expect(overview.summary.monitors).toEqual({ up: 2, total: 2 });
+      expect(overview.details.monitors.items).toEqual([
+        { name: 'mon-a', role: 'master', status: 'up', address: '127.0.0.1' },
+        { name: 'mon-b', role: 'standby', status: 'up', address: '127.0.0.2' }
+      ]);
+      expect(overview.summary.osd).toEqual({ up: 1, total: 1 });
+      expect(overview.summary.pools).toBe(1);
+      expect(overview.errors).toEqual([]);
+    } finally {
+      await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    }
   });
 
   test('loads Vitastor OSD, pool, capacity, and IO data through the etcd v3 gateway', async () => {

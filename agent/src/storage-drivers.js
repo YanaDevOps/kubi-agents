@@ -432,7 +432,7 @@ async function probeMonitor(member, config, masterId) {
   return {
     row: {
       name: member.record.hostname || address,
-      role: master ? 'master' : status === 'standby' ? 'standby' : undefined,
+      role: master ? 'master' : 'standby',
       status: status === 'up' || status === 'standby' || status === 'discovered' ? 'up' : 'down',
       address
     },
@@ -574,6 +574,61 @@ function defaultVitastorConfig() {
   };
 }
 
+function resolvedVitastorConfig(configured, discovered) {
+  return {
+    ...defaultVitastorConfig(),
+    ...(configured || {}),
+    endpoints: unique(
+      [...(configured?.endpoints || []), ...(discovered?.endpoints || [])]
+        .map((value) => withScheme(value, configured?.scheme || 'http'))
+    ),
+    prefix: configured?.prefix || discovered?.prefix || '/vitastor'
+  };
+}
+
+async function loadVitastorMonitorInventory(config) {
+  for (const endpoint of config.endpoints) {
+    try {
+      const entries = await etcdRange(endpoint, `${config.prefix.replace(/\/+$/, '')}/`, config);
+      const master = entries.find((entry) => entry.key.endsWith('/mon/master'));
+      const masterRecord = parseJson(master?.value || '');
+      const masterId = String(masterRecord.id || masterRecord.member_id || master?.value || '').replace(/^"|"$/g, '');
+      const members = entries
+        .filter((entry) => entry.key.includes('/mon/member/'))
+        .map((entry) => ({ id: entry.key.split('/').at(-1), record: parseJson(entry.value) }));
+      if (members.length === 0) continue;
+      const results = await Promise.all(members.map((member) => probeMonitor(member, config, masterId)));
+      return results.map((result) => result.row);
+    } catch {
+      // Monitor inventory enriches CLI data and must not downgrade otherwise healthy metrics.
+    }
+  }
+  return [];
+}
+
+async function enrichCliOverviewWithMonitors(overview, runtimeConfig, configured, discoverConfig = discoverVitastorConfig) {
+  const discovered = await discoverConfig(runtimeConfig)
+    .catch(() => ({ endpoints: [], prefix: '/vitastor', poolIds: [], evidence: [] }));
+  const config = resolvedVitastorConfig(configured, discovered);
+  if (config.endpoints.length === 0) return overview;
+
+  const monitors = await loadVitastorMonitorInventory(config);
+  if (monitors.length === 0) return overview;
+  const reportedTotal = numeric(overview.summary?.monitors?.total);
+  const monitorUp = monitors.filter((monitor) => monitor.status === 'up').length;
+  return {
+    ...overview,
+    summary: {
+      ...overview.summary,
+      monitors: { up: monitorUp, total: Math.max(reportedTotal, monitors.length) }
+    },
+    details: {
+      ...overview.details,
+      monitors: emptyResourceList(monitors, overview.fetchedAt)
+    }
+  };
+}
+
 export async function loadLocalStorageDriverOverview(runtimeConfig, input = {}, dependencies = {}) {
   const fetchedAt = new Date().toISOString();
   const driver = String(input.driver || '').trim();
@@ -595,17 +650,19 @@ export async function loadLocalStorageDriverOverview(runtimeConfig, input = {}, 
       fetchedAt,
       dependencies.execFile || executeFile
     );
-    if (cliOverview) return cliOverview;
+    if (cliOverview) {
+      return enrichCliOverviewWithMonitors(
+        cliOverview,
+        runtimeConfig,
+        configured,
+        dependencies.discoverVitastorConfig || discoverVitastorConfig
+      );
+    }
   } catch (error) {
     cliError = safeError(error);
   }
   const discovered = await discoverVitastorConfig(runtimeConfig).catch(() => ({ endpoints: [], prefix: '/vitastor', poolIds: [], evidence: [] }));
-  const config = {
-    ...defaultVitastorConfig(),
-    ...(configured || {}),
-    endpoints: unique([...(configured?.endpoints || []), ...discovered.endpoints].map((value) => withScheme(value, configured?.scheme || 'http'))),
-    prefix: configured?.prefix || discovered.prefix || '/vitastor'
-  };
+  const config = resolvedVitastorConfig(configured, discovered);
   if (config.endpoints.length === 0) {
     return applyDiscoveredPoolCount(emptyDriverSummary(
       'Vitastor',
