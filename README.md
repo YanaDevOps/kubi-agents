@@ -26,6 +26,7 @@ Agent `v0.1.22` adds an optional Prometheus pull endpoint for customer-owned das
 Agent `v0.1.23` adds CLI-first Vitastor metrics through bounded read-only `status`, `pools`, and `osds` JSON commands. Direct etcd remains a fallback, and KUBI reports usable pool capacity separately from raw OSD capacity.
 Agent `v0.1.24` restores per-monitor Vitastor inventory by enriching healthy CLI metrics with best-effort etcd monitor metadata without degrading OSD, pool, or capacity data when enrichment is unavailable.
 Agent `v0.1.25` adds an opt-in balanced Prometheus detail level with per-node, per-namespace, and per-workload metrics. The default aggregate mode is unchanged. The release also includes a Grafana dashboard, Prometheus alert rules, and local or authenticated remote scrape examples.
+Agent `v0.1.26` adds provider-neutral CSI health from CSINode, VolumeAttachment, CSIStorageCapacity, and positively matched CSI plugin Pods. It groups Ceph RBD/CephFS into one Rook/Ceph backend and adds read-only Rook/Ceph and Longhorn CRD/exporter adapters.
 
 ## Install
 
@@ -67,6 +68,7 @@ kubi-agent rotate
 - [Security model](docs/security.md)
 - [Troubleshooting](docs/troubleshooting.md)
 - [Prometheus metrics](docs/prometheus-metrics.md)
+- [Storage and CSI diagnostics](docs/storage.md)
 - [Bundled observability assets](observability/README.md)
 
 Release tags use `agent-vX.Y.Z`.

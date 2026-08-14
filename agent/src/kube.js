@@ -15,6 +15,15 @@ import {
 import { deriveRuntimeTargetKey } from '../../src/shared/runtime-target.js';
 import { classifySystemConfigMap } from '../../src/shared/system-configmap.js';
 import {
+  buildStorageProviderHealth,
+  canonicalStorageProviderId,
+  normalizeCSINode,
+  normalizeCSIStorageCapacity,
+  normalizeVolumeAttachment,
+  storageProviderCapabilities,
+  storageProviderName as sharedStorageProviderName
+} from '../../src/shared/storage-health.js';
+import {
   buildGatewayApiValidationItems,
   gatewayApiDefinitionsFromCrds
 } from '../../src/shared/gateway-api-validation.js';
@@ -3612,40 +3621,57 @@ function buildStorageValidationHighlights(persistentVolumes, persistentVolumeCla
   return highlights.sort((left, right) => validationSeverityRank(left.severity) - validationSeverityRank(right.severity));
 }
 
-function storageProviderName(value) {
-  const lower = String(value || '').toLowerCase();
-  if (lower.includes('ebs.csi.aws.com')) return 'AWS EBS CSI';
-  if (lower.includes('pd.csi.storage.gke.io')) return 'GCE Persistent Disk CSI';
-  if (lower.includes('disk.csi.azure.com')) return 'Azure Disk CSI';
-  if (lower.includes('file.csi.azure.com')) return 'Azure File CSI';
-  if (lower.includes('rbd.csi.ceph.com')) return 'Ceph RBD CSI';
-  if (lower.includes('cephfs.csi.ceph.com')) return 'CephFS CSI';
-  if (lower.includes('vitastor')) return 'Vitastor';
-  if (lower.includes('longhorn')) return 'Longhorn';
-  if (lower.includes('nfs')) return 'NFS';
-  if (lower.includes('no-provisioner')) return 'Local Persistent Volumes';
-  return value || 'Unknown storage provider';
+function buildCSIValidationHighlights(providers) {
+  return providers.flatMap((provider) => (provider.health?.issues || []).map((issue) =>
+    validationItem(
+      `storage.csi.${provider.providerId}.${issue.code}.${issue.attachmentName || issue.nodeName || 'driver'}`,
+      'storage',
+      issue.severity || 'warning',
+      issue.title,
+      issue.message,
+      'Inspect the CSI controller, node plugin, and VolumeAttachment state for this driver.',
+      [
+        ...(issue.attachmentName ? [{ kind: 'VolumeAttachment', name: issue.attachmentName }] : []),
+        ...(issue.persistentVolumeName ? [{ kind: 'PersistentVolume', name: issue.persistentVolumeName }] : []),
+        ...(issue.podName ? [{ kind: 'Pod', namespace: issue.namespace || 'default', name: issue.podName }] : []),
+        ...(issue.nodeName ? [{ kind: 'Node', name: issue.nodeName }] : [])
+      ],
+      [`Driver ${provider.providerName}`]
+    )
+  ));
 }
 
-function buildStorageProviders(storageClasses, csiDrivers) {
+function storageProviderName(value) {
+  return sharedStorageProviderName(value);
+}
+
+function buildStorageProviders(storageClasses, csiDrivers, healthInput = {}) {
   const byId = new Map();
-  const ensure = (providerId) => {
-    const key = String(providerId || 'unknown').trim() || 'unknown';
+  const ensure = (rawProviderId) => {
+    const rawId = String(rawProviderId || 'unknown').trim() || 'unknown';
+    const key = canonicalStorageProviderId(rawId);
     const existing = byId.get(key);
-    if (existing) return existing;
+    if (existing) {
+      if (!existing.driverIds.includes(rawId)) existing.driverIds.push(rawId);
+      return existing;
+    }
+    const capabilities = storageProviderCapabilities(key);
     const provider = {
       providerId: key,
       providerName: storageProviderName(key),
-      type: key.includes('csi') ? 'csi' : 'platform',
+      type: rawId.includes('csi') || key === 'rook-ceph' || key.includes('longhorn') ? 'csi' : 'platform',
       detected: true,
       configured: true,
       active: true,
       confidence: 'high',
       evidence: [],
+      driverIds: [rawId],
       features: {
-        runtimeOverview: key.toLowerCase().includes('vitastor'),
-        autoDiscovery: false,
-        manualConfig: false
+        runtimeOverview: capabilities.backendMetrics,
+        autoDiscovery: capabilities.backendMetrics,
+        manualConfig: key === 'csi.vitastor.io',
+        kubernetesHealth: true,
+        backendMetrics: capabilities.backendMetrics
       }
     };
     byId.set(key, provider);
@@ -3659,7 +3685,17 @@ function buildStorageProviders(storageClasses, csiDrivers) {
     ensure(storageClass.provisioner).evidence.push(`StorageClass ${storageClass.name}`);
   }
   return [...byId.values()]
-    .map((provider) => ({ ...provider, evidence: [...new Set(provider.evidence)].sort() }))
+    .map((provider) => ({
+      ...provider,
+      driverIds: [...new Set(provider.driverIds)].sort(),
+      evidence: [...new Set(provider.evidence)].sort(),
+      health: buildStorageProviderHealth({
+        ...healthInput,
+        providerId: provider.providerId,
+        driverIds: provider.driverIds,
+        storageClasses
+      })
+    }))
     .sort((left, right) => left.providerName.localeCompare(right.providerName));
 }
 
@@ -3931,7 +3967,12 @@ export async function loadLocalStorage(runtimeConfig, namespaceScope = null) {
         kubeConfig,
         namespacePath('/api/v1/persistentvolumeclaims', '/api/v1/namespaces/:namespace/persistentvolumeclaims', effectiveNamespace)
       ),
-      fetchKubeList(kubeConfig, '/apis/storage.k8s.io/v1/csidrivers')
+      fetchKubeList(kubeConfig, '/apis/storage.k8s.io/v1/csidrivers'),
+      fetchKubeList(kubeConfig, '/api/v1/nodes'),
+      fetchKubeList(kubeConfig, '/apis/storage.k8s.io/v1/csinodes'),
+      fetchKubeList(kubeConfig, '/apis/storage.k8s.io/v1/volumeattachments'),
+      fetchKubeList(kubeConfig, '/apis/storage.k8s.io/v1/csistoragecapacities'),
+      fetchKubeList(kubeConfig, '/api/v1/pods')
     ]);
 
     if (requests.every((entry) => entry.status === 'rejected')) {
@@ -3957,6 +3998,25 @@ export async function loadLocalStorage(runtimeConfig, namespaceScope = null) {
       requests[3].status === 'fulfilled'
         ? requests[3].value.items
         : (partial = true, issues.push(partialIssue('storage', 'CSIDrivers could not be loaded.')), []);
+    const nodeItems =
+      requests[4].status === 'fulfilled'
+        ? requests[4].value.items
+        : (partial = true, issues.push(partialIssue('storage', 'Nodes could not be loaded for CSI health.')), []);
+    const csiNodeItems =
+      requests[5].status === 'fulfilled'
+        ? requests[5].value.items
+        : (partial = true, issues.push(partialIssue('storage', 'CSINodes could not be loaded.')), []);
+    const volumeAttachmentItems =
+      requests[6].status === 'fulfilled'
+        ? requests[6].value.items
+        : (partial = true, issues.push(partialIssue('storage', 'VolumeAttachments could not be loaded.')), []);
+    const csiStorageCapacityItems =
+      requests[7].status === 'fulfilled'
+        ? requests[7].value.items
+        : (partial = true, issues.push(partialIssue('storage', 'CSIStorageCapacities could not be loaded.')), []);
+    const podItems = requests[8].status === 'fulfilled'
+      ? requests[8].value.items
+      : (partial = true, issues.push(partialIssue('storage', 'CSI plugin Pods could not be loaded.')), []);
 
     if (requests.some((entry) => entry.status === 'fulfilled' && entry.value.truncated)) {
       partial = true;
@@ -3990,6 +4050,21 @@ export async function loadLocalStorage(runtimeConfig, namespaceScope = null) {
       new Date().toISOString(),
       requests[3].status === 'fulfilled' ? requests[3].value.truncated : true
     );
+    const csiNodes = buildResourceList(
+      asRecordArray(csiNodeItems).map(normalizeCSINode).sort((left, right) => left.name.localeCompare(right.name)),
+      new Date().toISOString(),
+      requests[5].status === 'fulfilled' ? requests[5].value.truncated : true
+    );
+    const volumeAttachments = buildResourceList(
+      asRecordArray(volumeAttachmentItems).map(normalizeVolumeAttachment).sort((left, right) => left.name.localeCompare(right.name)),
+      new Date().toISOString(),
+      requests[6].status === 'fulfilled' ? requests[6].value.truncated : true
+    );
+    const csiStorageCapacities = buildResourceList(
+      asRecordArray(csiStorageCapacityItems).map(normalizeCSIStorageCapacity).sort((left, right) => left.name.localeCompare(right.name)),
+      new Date().toISOString(),
+      requests[7].status === 'fulfilled' ? requests[7].value.truncated : true
+    );
     const pvcUsage = await loadPVCUsage(kubeConfig);
     const usageObservedAt = new Date().toISOString();
     let validUsageCount = 0;
@@ -4020,7 +4095,14 @@ export async function loadLocalStorage(runtimeConfig, namespaceScope = null) {
         ? { ...volume, usedBytes, usageSource: 'kubelet-summary', usageObservedAt }
         : volume;
     });
-    const providers = buildStorageProviders(storageClasses.items, csiDrivers.items);
+    const providers = buildStorageProviders(storageClasses.items, csiDrivers.items, {
+      nodes: asRecordArray(nodeItems),
+      csiNodes: csiNodes.items,
+      volumeAttachments: volumeAttachments.items,
+      csiStorageCapacities: csiStorageCapacities.items,
+      pods: asRecordArray(podItems),
+      registrationAvailable: requests[5].status === 'fulfilled'
+    });
     const usageAvailable = validUsageCount > 0;
     const usagePartial = usageAvailable && (pvcUsage.status.failedNodes > 0 || discardedSamples > 0);
     const usageStatus = {
@@ -4048,6 +4130,10 @@ export async function loadLocalStorage(runtimeConfig, namespaceScope = null) {
         persistentVolumes: persistentVolumes.items.length,
         persistentVolumeClaims: persistentVolumeClaims.items.length,
         csiDrivers: csiDrivers.items.length,
+        csiNodes: csiNodes.items.length,
+        volumeAttachments: volumeAttachments.items.length,
+        failedAttachments: volumeAttachments.items.filter((item) => item.attachError || item.detachError).length,
+        csiStorageCapacities: csiStorageCapacities.items.length,
         boundClaims: persistentVolumeClaims.items.filter((claim) => (claim.status || '').toLowerCase() === 'bound').length,
         pendingClaims: persistentVolumeClaims.items.filter((claim) => (claim.status || '').toLowerCase() === 'pending').length,
         releasedVolumes: persistentVolumes.items.filter((volume) => {
@@ -4064,7 +4150,13 @@ export async function loadLocalStorage(runtimeConfig, namespaceScope = null) {
       persistentVolumes,
       persistentVolumeClaims,
       csiDrivers,
-      validationHighlights: buildStorageValidationHighlights(persistentVolumes.items, persistentVolumeClaims.items)
+      csiNodes,
+      volumeAttachments,
+      csiStorageCapacities,
+      validationHighlights: [
+        ...buildStorageValidationHighlights(persistentVolumes.items, persistentVolumeClaims.items),
+        ...buildCSIValidationHighlights(providers)
+      ].sort((left, right) => validationSeverityRank(left.severity) - validationSeverityRank(right.severity))
     };
   } catch (error) {
     throw new Error(sanitizeKubeError(error));

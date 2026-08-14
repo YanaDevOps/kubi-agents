@@ -3,6 +3,7 @@ import http from 'node:http';
 import https from 'node:https';
 import { execFile as nodeExecFile } from 'node:child_process';
 import { discoverLocalAccessCandidates, fetchKubeList, loadLocalKubeConfig, metadataFor } from './kube.js';
+import { loadCephStorageOverview, loadLonghornStorageOverview } from './storage-provider-adapters.js';
 
 const CLI_MAX_OUTPUT_BYTES = 4 * 1024 * 1024;
 
@@ -629,7 +630,7 @@ async function enrichCliOverviewWithMonitors(overview, runtimeConfig, configured
   };
 }
 
-export async function loadLocalStorageDriverOverview(runtimeConfig, input = {}, dependencies = {}) {
+async function loadVitastorStorageDriverOverview(runtimeConfig, input = {}, dependencies = {}) {
   const fetchedAt = new Date().toISOString();
   const driver = String(input.driver || '').trim();
   if (!driver) return emptyDriverSummary('Unknown', fetchedAt, 'Select a storage driver.');
@@ -764,4 +765,50 @@ export async function loadLocalStorageDriverOverview(runtimeConfig, input = {}, 
       : `Vitastor metrics loaded through Kubernetes auto-discovery${discovered.evidence.length ? ` (${discovered.evidence[0]})` : ''}.`,
     errors
   };
+}
+
+function withStorageOverviewV2(overview, backendKind) {
+  return {
+    ...overview,
+    schemaVersion: 2,
+    capabilities: {
+      kubernetesInventory: true,
+      nodeRegistration: true,
+      attachments: true,
+      topologyCapacity: true,
+      backendMetrics: backendKind !== 'none'
+    },
+    backendSections: overview.backendSections || [],
+    driver: {
+      ...overview.driver,
+      backendKind,
+      features: {
+        ...overview.driver?.features,
+        kubernetesHealth: true,
+        backendMetrics: backendKind !== 'none'
+      }
+    }
+  };
+}
+
+export async function loadLocalStorageDriverOverview(runtimeConfig, input = {}, dependencies = {}) {
+  const driver = String(input.driver || '').trim();
+  if (/^(rook-ceph|ceph)$/i.test(driver) || /(?:rbd|cephfs)\.csi\.ceph\.com/i.test(driver)) {
+    return loadCephStorageOverview(runtimeConfig, input, dependencies);
+  }
+  if (/longhorn/i.test(driver)) {
+    return loadLonghornStorageOverview(runtimeConfig, input, dependencies);
+  }
+  if (/vitastor/i.test(driver)) {
+    return withStorageOverviewV2(await loadVitastorStorageDriverOverview(runtimeConfig, input, dependencies), 'vitastor');
+  }
+  const fetchedAt = new Date().toISOString();
+  return withStorageOverviewV2(
+    emptyDriverSummary(
+      driver || 'Unknown',
+      fetchedAt,
+      'Kubernetes CSI health is available. This provider does not publish a supported backend metrics adapter.'
+    ),
+    'none'
+  );
 }
