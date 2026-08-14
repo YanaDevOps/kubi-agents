@@ -33,6 +33,37 @@ function snapshot() {
       podCpuUsageCores: 0.5,
       podMemoryUsageBytes: 512
     },
+    details: {
+      nodes: [{
+        name: 'worker-1',
+        ready: true,
+        pressures: { memory: false, disk: false, pid: false, network: false },
+        cpuAllocatableCores: 4,
+        memoryAllocatableBytes: 8589934592,
+        cpuUsageCores: 1.5,
+        memoryUsageBytes: 1024
+      }],
+      namespaces: [{
+        name: 'default',
+        phases: { running: 2, pending: 1, succeeded: 0, failed: 0, unknown: 0 },
+        activeReady: 2,
+        activeNotReady: 1,
+        cpuUsageCores: 0.5,
+        memoryUsageBytes: 512,
+        cpuRequestsCores: 1,
+        cpuLimitsCores: 2,
+        memoryRequestsBytes: 536870912,
+        memoryLimitsBytes: 1073741824
+      }],
+      workloads: [{
+        namespace: 'default',
+        kind: 'deployment',
+        name: 'web',
+        desired: 3,
+        ready: 2,
+        available: 2
+      }]
+    },
     health: 'healthy',
     partial: false
   };
@@ -77,6 +108,57 @@ describe('Prometheus exporter', () => {
     expect(output).not.toContain('node=');
   });
 
+  test('renders opt-in balanced node, namespace and workload metrics without pod labels', () => {
+    const output = renderPrometheusMetrics({
+      version: '0.1.25',
+      runtimeApiVersion: '2',
+      platform: 'linux/x64',
+      state: createAgentMetricsState(),
+      collection: {
+        detailLevel: 'balanced',
+        durationSeconds: 0.2,
+        lastSuccessTimestampSeconds: 1,
+        contexts: [{ context: 'production', up: true, snapshot: snapshot() }]
+      }
+    });
+
+    expect(output).toContain('kubi_node_ready{context="production",node="worker-1"} 1');
+    expect(output).toContain('kubi_node_cpu_allocatable_cores{context="production",node="worker-1"} 4');
+    expect(output).toContain('kubi_namespace_pods{context="production",namespace="default",phase="pending"} 1');
+    expect(output).toContain('kubi_namespace_pod_cpu_requests_cores{context="production",namespace="default"} 1');
+    expect(output).toContain('kubi_workload_replicas{context="production",kind="deployment",namespace="default",state="ready",workload="web"} 2');
+    expect(output).not.toContain('pod=');
+    expect(output).not.toContain('container=');
+  });
+
+  test('omits usage samples instead of reporting false zeroes when metrics.k8s.io is unavailable', () => {
+    const unavailable = snapshot();
+    unavailable.metrics = { available: false };
+    delete unavailable.details.nodes[0].cpuUsageCores;
+    delete unavailable.details.nodes[0].memoryUsageBytes;
+    delete unavailable.details.namespaces[0].cpuUsageCores;
+    delete unavailable.details.namespaces[0].memoryUsageBytes;
+
+    const output = renderPrometheusMetrics({
+      version: '0.1.25',
+      runtimeApiVersion: '2',
+      platform: 'linux/x64',
+      state: createAgentMetricsState(),
+      collection: {
+        detailLevel: 'balanced',
+        durationSeconds: 0.2,
+        lastSuccessTimestampSeconds: 1,
+        contexts: [{ context: 'production', up: true, snapshot: unavailable }]
+      }
+    });
+
+    expect(output).toContain('kubi_cluster_metrics_api_available{context="production"} 0');
+    expect(output).not.toContain('kubi_cluster_node_cpu_usage_cores{context="production"}');
+    expect(output).not.toContain('kubi_node_cpu_usage_cores{context="production",node="worker-1"}');
+    expect(output).not.toContain('kubi_namespace_pod_cpu_usage_cores{context="production",namespace="default"}');
+    expect(output).toContain('kubi_namespace_pod_cpu_requests_cores{context="production",namespace="default"} 1');
+  });
+
   test('serves cached metrics behind bearer authentication', async () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'kubi-agent-metrics-'));
     const tokenPath = path.join(directory, 'token');
@@ -89,6 +171,7 @@ describe('Prometheus exporter', () => {
           listenAddress: '127.0.0.1',
           port: 0,
           collectionIntervalSeconds: 60,
+          detailLevel: 'balanced',
           contexts: [],
           bearerTokenFile: tokenPath,
           tls: { certFile: '', keyFile: '' }
@@ -102,8 +185,9 @@ describe('Prometheus exporter', () => {
         candidates: [{ sourceContextName: 'production', clusterFingerprint: 'fp', recommendedMode: 'agent' }]
       }),
       selectorProvider: (runtimeConfig) => runtimeConfig,
-      snapshotProvider: async () => {
+      snapshotProvider: async (_runtimeConfig, options) => {
         collections += 1;
+        expect(options).toEqual({ detailLevel: 'balanced' });
         return snapshot();
       }
     });

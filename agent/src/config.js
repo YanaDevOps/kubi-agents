@@ -87,6 +87,14 @@ function normalizeMetricsExporter(settings) {
     15,
     3600
   );
+  const detailLevel = optionalString(
+    exporter.detail_level,
+    'metrics_exporter.detail_level',
+    'aggregate'
+  ).toLowerCase();
+  if (!['aggregate', 'balanced'].includes(detailLevel)) {
+    throw new Error('metrics_exporter.detail_level must be aggregate or balanced.');
+  }
   if (!Number.isInteger(port)) throw new Error('metrics_exporter.port must be an integer.');
   if (!Number.isInteger(collectionIntervalSeconds)) {
     throw new Error('metrics_exporter.collection_interval_seconds must be an integer.');
@@ -125,6 +133,7 @@ function normalizeMetricsExporter(settings) {
     listenAddress,
     port,
     collectionIntervalSeconds,
+    detailLevel,
     contexts,
     bearerTokenFile,
     allowInsecureHttp,

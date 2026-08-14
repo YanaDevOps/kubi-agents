@@ -1,0 +1,186 @@
+{
+  "__inputs": [
+    {
+      "name": "DS_PROMETHEUS",
+      "label": "Prometheus / VictoriaMetrics",
+      "description": "Prometheus-compatible datasource that scrapes KUBI Agent",
+      "type": "datasource",
+      "pluginId": "prometheus",
+      "pluginName": "Prometheus"
+    }
+  ],
+  "annotations": { "list": [] },
+  "description": "Current KUBI Agent and Kubernetes health. Namespace and workload panels require metrics_exporter.detail_level: balanced.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Context reachable",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [{ "refId": "A", "expr": "max(kubi_cluster_up{context=~\"$context\"})", "legendFormat": "Reachable" }],
+      "fieldConfig": { "defaults": { "mappings": [{ "options": { "0": { "text": "DOWN", "color": "red" }, "1": { "text": "UP", "color": "green" } }, "type": "value" }], "thresholds": { "mode": "absolute", "steps": [{ "color": "red", "value": null }, { "color": "green", "value": 1 }] } }, "overrides": [] },
+      "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "center", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "gridPos": { "h": 5, "w": 4, "x": 0, "y": 0 }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Critical health",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [{ "refId": "A", "expr": "max(kubi_cluster_health{context=~\"$context\",status=\"critical\"})", "legendFormat": "Critical" }],
+      "fieldConfig": { "defaults": { "mappings": [{ "options": { "0": { "text": "NOT CRITICAL", "color": "green" }, "1": { "text": "CRITICAL", "color": "red" } }, "type": "value" }], "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }, { "color": "red", "value": 1 }] } }, "overrides": [] },
+      "options": { "colorMode": "background", "graphMode": "none", "justifyMode": "center", "orientation": "auto", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "gridPos": { "h": 5, "w": 4, "x": 4, "y": 0 }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Nodes",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "refId": "A", "expr": "sum(kubi_cluster_nodes{context=~\"$context\",state=\"ready\"})", "legendFormat": "Ready" },
+        { "refId": "B", "expr": "sum(kubi_cluster_nodes{context=~\"$context\",state=\"not_ready\"})", "legendFormat": "Not Ready" }
+      ],
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "unit": "short" }, "overrides": [] },
+      "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "horizontal", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "gridPos": { "h": 5, "w": 4, "x": 8, "y": 0 }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Active Pods",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "refId": "A", "expr": "sum(kubi_cluster_active_pods{context=~\"$context\",state=\"ready\"})", "legendFormat": "Ready" },
+        { "refId": "B", "expr": "sum(kubi_cluster_active_pods{context=~\"$context\",state=\"not_ready\"})", "legendFormat": "Not Ready" }
+      ],
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "unit": "short" }, "overrides": [] },
+      "options": { "colorMode": "value", "graphMode": "area", "justifyMode": "auto", "orientation": "horizontal", "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "textMode": "auto" },
+      "gridPos": { "h": 5, "w": 4, "x": 12, "y": 0 }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Cluster CPU usage",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "refId": "A", "expr": "sum(kubi_cluster_node_cpu_usage_cores{context=~\"$context\"})", "legendFormat": "Node usage" },
+        { "refId": "B", "expr": "sum(kubi_cluster_pod_cpu_usage_cores{context=~\"$context\"})", "legendFormat": "Pod usage" }
+      ],
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "fillOpacity": 16, "lineWidth": 2, "showPoints": "never" }, "unit": "cores" }, "overrides": [] },
+      "options": { "legend": { "calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 5 }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Cluster memory usage",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [
+        { "refId": "A", "expr": "sum(kubi_cluster_node_memory_usage_bytes{context=~\"$context\"})", "legendFormat": "Node usage" },
+        { "refId": "B", "expr": "sum(kubi_cluster_pod_memory_usage_bytes{context=~\"$context\"})", "legendFormat": "Pod usage" }
+      ],
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "fillOpacity": 16, "lineWidth": 2, "showPoints": "never" }, "unit": "bytes" }, "overrides": [] },
+      "options": { "legend": { "calcs": ["lastNotNull"], "displayMode": "table", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 5 }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Namespace CPU usage (balanced)",
+      "description": "Requires metrics_exporter.detail_level: balanced and metrics.k8s.io.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [{ "refId": "A", "expr": "sum by (namespace) (kubi_namespace_pod_cpu_usage_cores{context=~\"$context\",namespace=~\"$namespace\"})", "legendFormat": "{{namespace}}" }],
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "fillOpacity": 12, "lineWidth": 2, "showPoints": "never" }, "unit": "cores" }, "overrides": [] },
+      "options": { "legend": { "calcs": ["lastNotNull"], "displayMode": "table", "placement": "right", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "gridPos": { "h": 9, "w": 8, "x": 0, "y": 13 }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Namespace memory usage (balanced)",
+      "description": "Requires metrics_exporter.detail_level: balanced and metrics.k8s.io.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [{ "refId": "A", "expr": "sum by (namespace) (kubi_namespace_pod_memory_usage_bytes{context=~\"$context\",namespace=~\"$namespace\"})", "legendFormat": "{{namespace}}" }],
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "fillOpacity": 12, "lineWidth": 2, "showPoints": "never" }, "unit": "bytes" }, "overrides": [] },
+      "options": { "legend": { "calcs": ["lastNotNull"], "displayMode": "table", "placement": "right", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "gridPos": { "h": 9, "w": 8, "x": 8, "y": 13 }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Node pressure",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [{ "refId": "A", "expr": "sum by (type) (kubi_cluster_node_pressure{context=~\"$context\"})", "legendFormat": "{{type}}" }],
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "bars", "fillOpacity": 30, "lineWidth": 1 }, "min": 0, "unit": "short" }, "overrides": [] },
+      "options": { "legend": { "calcs": ["lastNotNull"], "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 22 }
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Unavailable workloads",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [{ "refId": "A", "expr": "sum by (kind) (kubi_cluster_unavailable_workloads{context=~\"$context\"})", "legendFormat": "{{kind}}" }],
+      "fieldConfig": { "defaults": { "color": { "mode": "palette-classic" }, "custom": { "drawStyle": "line", "fillOpacity": 20, "lineWidth": 2, "showPoints": "never" }, "min": 0, "unit": "short" }, "overrides": [] },
+      "options": { "legend": { "calcs": ["lastNotNull"], "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } },
+      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 22 }
+    },
+    {
+      "id": 11,
+      "type": "table",
+      "title": "Workload replicas (balanced)",
+      "description": "Requires metrics_exporter.detail_level: balanced.",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "targets": [{ "refId": "A", "expr": "kubi_workload_replicas{context=~\"$context\",namespace=~\"$namespace\"}", "format": "table", "instant": true, "legendFormat": "{{namespace}} / {{kind}} / {{workload}} / {{state}}" }],
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "custom": { "align": "auto", "cellOptions": { "type": "auto" } }, "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] } }, "overrides": [] },
+      "options": { "cellHeight": "sm", "showHeader": true },
+      "gridPos": { "h": 9, "w": 16, "x": 0, "y": 29 }
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["kubi", "kubernetes", "agent"],
+  "templating": {
+    "list": [
+      {
+        "name": "context",
+        "label": "Context",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "query": { "query": "label_values(kubi_cluster_up, context)", "refId": "KUBI_CONTEXTS" },
+        "definition": "label_values(kubi_cluster_up, context)",
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "refresh": 1,
+        "current": { "selected": true, "text": "All", "value": "$__all" }
+      },
+      {
+        "name": "namespace",
+        "label": "Namespace",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "query": { "query": "label_values(kubi_namespace_pods{context=~\"$context\"}, namespace)", "refId": "KUBI_NAMESPACES" },
+        "definition": "label_values(kubi_namespace_pods{context=~\"$context\"}, namespace)",
+        "includeAll": true,
+        "allValue": ".*",
+        "multi": true,
+        "refresh": 2,
+        "current": { "selected": true, "text": "All", "value": "$__all" }
+      }
+    ]
+  },
+  "time": { "from": "now-6h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "KUBI Agent Overview",
+  "uid": "kubi-agent-overview",
+  "version": 1,
+  "weekStart": ""
+}

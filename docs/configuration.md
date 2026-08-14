@@ -20,6 +20,7 @@ metrics_exporter:
   listen_address: 127.0.0.1
   port: 9464
   collection_interval_seconds: 60
+  detail_level: aggregate
   contexts: []
   # bearer_token_file: /etc/kubi-agent/metrics.token
   # allow_insecure_http: false
@@ -81,7 +82,7 @@ Use `kubi-agent config validate` before restart and `kubi-agent config show --ef
 
 By default systemd captures stdout/stderr in journald. Optional file output uses size rotation and never intentionally logs kubeconfig contents, tokens, certificates, or Kubernetes response payloads.
 
-`metrics_exporter` is independent of the KUBI plan and disabled by default. Empty `contexts` collects all unambiguous discovered contexts. A non-loopback `listen_address` requires `bearer_token_file` plus TLS unless `allow_insecure_http: true` is explicitly set for an already protected private network. See [Prometheus metrics](prometheus-metrics.md).
+`metrics_exporter` is independent of the KUBI plan and disabled by default. Empty `contexts` collects all unambiguous discovered contexts. `detail_level: aggregate` exports only bounded context totals; explicitly set `detail_level: balanced` to add node, namespace, and workload series for the bundled dashboard. A non-loopback `listen_address` requires `bearer_token_file` plus TLS unless `allow_insecure_http: true` is explicitly set for an already protected private network. See [Prometheus metrics](prometheus-metrics.md).
 
 ## Storage driver metrics
 

@@ -80,6 +80,10 @@ jobs:
         run: |
           cp agent/install/install.sh dist/install.sh
           cp agent/install/install.ps1 dist/install.ps1
+          cp observability/grafana/kubi-agent-overview.json dist/kubi-agent-grafana-dashboard.json
+          cp observability/prometheus/kubi-agent-alerts.yaml dist/kubi-agent-alerts.yaml
+          cp observability/prometheus/scrape-local.example.yaml dist/kubi-agent-scrape-local.yaml
+          cp observability/prometheus/scrape-remote.example.yaml dist/kubi-agent-scrape-remote.yaml
           chmod +x dist/install.sh
           (cd dist && sha256sum kubi-agent-* install.sh install.ps1 > SHA256SUMS)
       - name: Sign release artifacts

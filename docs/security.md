@@ -12,7 +12,7 @@ Pairing tokens are one-time and expire after 30 minutes. After registration the 
 
 The loopback listener on `127.0.0.1:47641` remains for local diagnostics and compatibility. Do not expose it publicly; hosted browser traffic uses the outbound relay.
 
-The optional Prometheus endpoint is a separate server and cannot route to the local runtime API. It emits only bounded aggregate metrics. Its default bind is `127.0.0.1:9464`; remote binds require a protected bearer-token file and TLS unless authenticated plaintext HTTP is explicitly enabled on a trusted network.
+The optional Prometheus endpoint is a separate server and cannot route to the local runtime API. Its default aggregate level emits bounded context totals. The explicit balanced level additionally labels node, namespace, and workload state, but never Pod or container names. Its default bind is `127.0.0.1:9464`; remote binds require a protected bearer-token file and TLS unless authenticated plaintext HTTP is explicitly enabled on a trusted network.
 
 Installers verify SHA-256 before installation. Release assets include cosign signatures and certificates for independent verification.
 

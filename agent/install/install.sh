@@ -81,12 +81,13 @@ discovery:
   # namespace: default
 
 # Optional Prometheus pull endpoint. It is disabled and loopback-only by default.
-# The exporter exposes aggregate agent/cluster health, never credentials or per-resource names.
+# Balanced detail adds namespace, node, and workload labels, but never Pod/container names or credentials.
 metrics_exporter:
   enabled: false
   listen_address: 127.0.0.1
   port: 9464
   collection_interval_seconds: 60
+  detail_level: aggregate # Set to balanced for the bundled Grafana detail panels.
   contexts: []
   # bearer_token_file: /etc/kubi-agent/metrics.token
   # allow_insecure_http: false

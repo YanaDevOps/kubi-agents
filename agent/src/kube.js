@@ -4767,11 +4767,101 @@ function aggregateMetricUsage(items, sumContainers) {
   return { cpuUsageCores: cpuMilli / 1000, memoryUsageBytes: memoryBytes };
 }
 
+function prometheusPhase(value) {
+  const phase = String(value || 'Unknown').toLowerCase();
+  return ['running', 'pending', 'succeeded', 'failed'].includes(phase) ? phase : 'unknown';
+}
+
+function buildBalancedPrometheusDetails({ namespaceItems, nodes, pods, workloads, nodeMetricItems, podMetricItems, metricsAvailable }) {
+  const nodeUsage = new Map(asRecordArray(nodeMetricItems).map((item) => [
+    metadataFor(item).name,
+    aggregateMetricUsage([item], false)
+  ]));
+  const nodeRows = nodes.map((node) => {
+    const usage = nodeUsage.get(node.name);
+    return {
+      name: node.name,
+      ready: node.ready,
+      pressures: {
+        memory: node.conditions.memoryPressure,
+        disk: node.conditions.diskPressure,
+        pid: node.conditions.pidPressure,
+        network: node.conditions.networkUnavailable
+      },
+      cpuAllocatableCores: node.cpuAllocatableMilli / 1000,
+      memoryAllocatableBytes: node.memoryAllocatableBytes,
+      ...(metricsAvailable && usage ? usage : {})
+    };
+  }).sort((left, right) => left.name.localeCompare(right.name));
+
+  const namespaceRows = new Map();
+  const ensureNamespace = (name) => {
+    const key = name || 'default';
+    const existing = namespaceRows.get(key);
+    if (existing) return existing;
+    const row = {
+      name: key,
+      phases: { running: 0, pending: 0, succeeded: 0, failed: 0, unknown: 0 },
+      activeReady: 0,
+      activeNotReady: 0,
+      cpuRequestsCores: 0,
+      cpuLimitsCores: 0,
+      memoryRequestsBytes: 0,
+      memoryLimitsBytes: 0,
+      ...(metricsAvailable ? { cpuUsageCores: 0, memoryUsageBytes: 0 } : {})
+    };
+    namespaceRows.set(key, row);
+    return row;
+  };
+
+  for (const item of asRecordArray(namespaceItems)) ensureNamespace(metadataFor(item).name);
+  for (const pod of pods) {
+    const row = ensureNamespace(pod.namespace);
+    const phase = prometheusPhase(pod.phase);
+    row.phases[phase] += 1;
+    if (phase !== 'succeeded') {
+      if (pod.ready) row.activeReady += 1;
+      else row.activeNotReady += 1;
+    }
+    if (phase !== 'succeeded' && phase !== 'failed') {
+      row.cpuRequestsCores += pod.cpuRequestsMilli / 1000;
+      row.cpuLimitsCores += pod.cpuLimitsMilli / 1000;
+      row.memoryRequestsBytes += pod.memoryRequestsBytes;
+      row.memoryLimitsBytes += pod.memoryLimitsBytes;
+    }
+  }
+  if (metricsAvailable) {
+    for (const item of asRecordArray(podMetricItems)) {
+      const row = ensureNamespace(metadataFor(item).namespace);
+      const usage = aggregateMetricUsage([item], true);
+      row.cpuUsageCores += usage.cpuUsageCores;
+      row.memoryUsageBytes += usage.memoryUsageBytes;
+    }
+  }
+
+  const workloadRows = Object.entries(workloads).flatMap(([kind, items]) => items.map((workload) => ({
+    namespace: workload.namespace,
+    kind,
+    name: workload.name,
+    desired: workload.desired,
+    ready: workload.ready,
+    available: workload.available
+  }))).sort((left, right) => {
+    return `${left.namespace}/${left.kind}/${left.name}`.localeCompare(`${right.namespace}/${right.kind}/${right.name}`);
+  });
+
+  return {
+    nodes: nodeRows,
+    namespaces: [...namespaceRows.values()].sort((left, right) => left.name.localeCompare(right.name)),
+    workloads: workloadRows
+  };
+}
+
 /**
- * Collects one low-cardinality cluster snapshot for the optional Prometheus exporter.
- * Resource names never leave this function, keeping the metric label set bounded.
+ * Collects one bounded cluster snapshot for the optional Prometheus exporter.
+ * Resource names are added only for the explicitly selected balanced detail level.
  */
-export async function loadLocalPrometheusSnapshot(runtimeConfig) {
+export async function loadLocalPrometheusSnapshot(runtimeConfig, options = {}) {
   const kubeConfig = loadLocalKubeConfig(runtimeConfig);
   const requests = await Promise.allSettled([
     fetchKubeList(kubeConfig, '/api/v1/namespaces'),
@@ -4871,6 +4961,18 @@ export async function loadLocalPrometheusSnapshot(runtimeConfig) {
     servicesWithoutReadyEndpoints > 0 ||
     pressures.network > 0;
 
+  const details = options.detailLevel === 'balanced'
+    ? buildBalancedPrometheusDetails({
+        namespaceItems: items(0),
+        nodes,
+        pods,
+        workloads: normalizedWorkloads,
+        nodeMetricItems: items(9),
+        podMetricItems: items(10),
+        metricsAvailable
+      })
+    : undefined;
+
   return {
     namespaces: items(0).length,
     nodes: {
@@ -4897,7 +4999,8 @@ export async function loadLocalPrometheusSnapshot(runtimeConfig) {
       podMemoryUsageBytes: podUsage.memoryUsageBytes
     },
     health: critical ? 'critical' : warning ? 'warning' : 'healthy',
-    partial
+    partial,
+    ...(details ? { details } : {})
   };
 }
 

@@ -41,6 +41,7 @@ discovery:
         listenAddress: '127.0.0.1',
         port: 9464,
         collectionIntervalSeconds: 60,
+        detailLevel: 'aggregate',
         contexts: [],
         bearerTokenFile: '',
         allowInsecureHttp: false,
@@ -83,6 +84,7 @@ discovery:
       metrics_exporter: {
         enabled: true,
         listen_address: '0.0.0.0',
+        detail_level: 'balanced',
         bearer_token_file: '/etc/kubi-agent/metrics.token',
         tls: {
           cert_file: '/etc/kubi-agent/tls/metrics.crt',
@@ -92,12 +94,18 @@ discovery:
     }).metricsExporter).toMatchObject({
       enabled: true,
       listenAddress: '0.0.0.0',
+      detailLevel: 'balanced',
       bearerTokenFile: '/etc/kubi-agent/metrics.token',
       tls: {
         certFile: '/etc/kubi-agent/tls/metrics.crt',
         keyFile: '/etc/kubi-agent/tls/metrics.key'
       }
     });
+
+    expect(validateAgentSettings({ metrics_exporter: {} }).metricsExporter.detailLevel).toBe('aggregate');
+    expect(() => validateAgentSettings({
+      metrics_exporter: { detail_level: 'per-pod' }
+    })).toThrow('metrics_exporter.detail_level must be aggregate or balanced');
   });
 
   test('uses the running binary release instead of stale pairing metadata', () => {

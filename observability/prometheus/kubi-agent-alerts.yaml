@@ -1,0 +1,84 @@
+groups:
+  - name: kubi-agent
+    interval: 30s
+    rules:
+      - alert: KubiAgentRelayDisconnected
+        expr: kubi_agent_relay_connected == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: KUBI Agent relay is disconnected
+          description: The agent has not maintained its hosted relay connection for five minutes.
+
+      - alert: KubiContextUnavailable
+        expr: kubi_cluster_up == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Kubernetes context is unavailable to KUBI Agent
+          description: KUBI Agent cannot collect the current context through its configured kubeconfig.
+
+      - alert: KubiClusterCritical
+        expr: kubi_cluster_health{status="critical"} == 1
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: KUBI reports critical cluster health
+          description: Current node, Pod, or workload state has kept the cluster in KUBI critical health for five minutes.
+
+      - alert: KubiNodeNotReady
+        expr: kubi_cluster_nodes{state="not_ready"} > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: Kubernetes node is NotReady
+          description: At least one node has remained NotReady for five minutes.
+
+      - alert: KubiNodePressure
+        expr: kubi_cluster_node_pressure > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Kubernetes node pressure detected
+          description: At least one node currently reports memory, disk, PID, or network pressure.
+
+      - alert: KubiWorkloadUnavailable
+        expr: kubi_cluster_unavailable_workloads > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Kubernetes workload replicas are unavailable
+          description: Desired and ready replica counts have not matched for ten minutes.
+
+      - alert: KubiCrashLoopPods
+        expr: kubi_cluster_crashloop_pods > 0
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: Pods are in CrashLoopBackOff
+          description: KUBI has detected active Pods in CrashLoopBackOff for ten minutes.
+
+      - alert: KubiFailedJobs
+        expr: kubi_cluster_failed_jobs > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: Kubernetes Jobs are failed
+          description: At least one Job currently reports a Failed condition.
+
+      - alert: KubiServiceWithoutReadyEndpoints
+        expr: kubi_cluster_services_without_ready_endpoints > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: Kubernetes Service has no ready endpoints
+          description: A selector-based Service has not had ready EndpointSlice addresses for ten minutes.

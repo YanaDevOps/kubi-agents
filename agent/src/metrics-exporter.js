@@ -34,7 +34,22 @@ const metricDefinitions = [
   ['kubi_cluster_node_cpu_usage_cores', 'Aggregate node CPU usage reported by metrics.k8s.io.', 'gauge'],
   ['kubi_cluster_node_memory_usage_bytes', 'Aggregate node memory usage reported by metrics.k8s.io.', 'gauge'],
   ['kubi_cluster_pod_cpu_usage_cores', 'Aggregate pod CPU usage reported by metrics.k8s.io.', 'gauge'],
-  ['kubi_cluster_pod_memory_usage_bytes', 'Aggregate pod memory usage reported by metrics.k8s.io.', 'gauge']
+  ['kubi_cluster_pod_memory_usage_bytes', 'Aggregate pod memory usage reported by metrics.k8s.io.', 'gauge'],
+  ['kubi_node_ready', 'Whether an individual Kubernetes node is Ready.', 'gauge'],
+  ['kubi_node_pressure', 'Whether an individual node reports a current pressure condition.', 'gauge'],
+  ['kubi_node_cpu_usage_cores', 'Node CPU usage reported by metrics.k8s.io.', 'gauge'],
+  ['kubi_node_cpu_allocatable_cores', 'Allocatable CPU capacity for an individual node.', 'gauge'],
+  ['kubi_node_memory_usage_bytes', 'Node memory usage reported by metrics.k8s.io.', 'gauge'],
+  ['kubi_node_memory_allocatable_bytes', 'Allocatable memory capacity for an individual node.', 'gauge'],
+  ['kubi_namespace_pods', 'Number of Pods in a namespace by current phase.', 'gauge'],
+  ['kubi_namespace_active_pods', 'Number of non-completed Pods in a namespace by readiness state.', 'gauge'],
+  ['kubi_namespace_pod_cpu_usage_cores', 'Aggregate Pod CPU usage in a namespace reported by metrics.k8s.io.', 'gauge'],
+  ['kubi_namespace_pod_memory_usage_bytes', 'Aggregate Pod memory usage in a namespace reported by metrics.k8s.io.', 'gauge'],
+  ['kubi_namespace_pod_cpu_requests_cores', 'Aggregate CPU requests for active Pods in a namespace.', 'gauge'],
+  ['kubi_namespace_pod_cpu_limits_cores', 'Aggregate CPU limits for active Pods in a namespace.', 'gauge'],
+  ['kubi_namespace_pod_memory_requests_bytes', 'Aggregate memory requests for active Pods in a namespace.', 'gauge'],
+  ['kubi_namespace_pod_memory_limits_bytes', 'Aggregate memory limits for active Pods in a namespace.', 'gauge'],
+  ['kubi_workload_replicas', 'Replica counts for an individual Kubernetes workload.', 'gauge']
 ];
 
 function labelValue(value) {
@@ -53,6 +68,10 @@ function metricValue(value) {
 
 function sample(lines, name, value, metricLabels = {}) {
   lines.push(`${name}${labels(metricLabels)} ${metricValue(value)}`);
+}
+
+function finiteMetric(value) {
+  return typeof value === 'number' && Number.isFinite(value);
 }
 
 export function createAgentMetricsState() {
@@ -119,10 +138,62 @@ export function renderPrometheusMetrics({ version, runtimeApiVersion, platform, 
     sample(lines, 'kubi_cluster_failed_jobs', snapshot.failedJobs, { context });
     sample(lines, 'kubi_cluster_services_without_ready_endpoints', snapshot.servicesWithoutReadyEndpoints, { context });
     sample(lines, 'kubi_cluster_metrics_api_available', snapshot.metrics?.available ? 1 : 0, { context });
-    sample(lines, 'kubi_cluster_node_cpu_usage_cores', snapshot.metrics?.nodeCpuUsageCores, { context });
-    sample(lines, 'kubi_cluster_node_memory_usage_bytes', snapshot.metrics?.nodeMemoryUsageBytes, { context });
-    sample(lines, 'kubi_cluster_pod_cpu_usage_cores', snapshot.metrics?.podCpuUsageCores, { context });
-    sample(lines, 'kubi_cluster_pod_memory_usage_bytes', snapshot.metrics?.podMemoryUsageBytes, { context });
+    if (snapshot.metrics?.available) {
+      sample(lines, 'kubi_cluster_node_cpu_usage_cores', snapshot.metrics.nodeCpuUsageCores, { context });
+      sample(lines, 'kubi_cluster_node_memory_usage_bytes', snapshot.metrics.nodeMemoryUsageBytes, { context });
+      sample(lines, 'kubi_cluster_pod_cpu_usage_cores', snapshot.metrics.podCpuUsageCores, { context });
+      sample(lines, 'kubi_cluster_pod_memory_usage_bytes', snapshot.metrics.podMemoryUsageBytes, { context });
+    }
+
+    if (collection.detailLevel !== 'balanced' || !snapshot.details) continue;
+    for (const node of [...(snapshot.details.nodes || [])].sort((left, right) => left.name.localeCompare(right.name))) {
+      const nodeLabels = { context, node: node.name };
+      sample(lines, 'kubi_node_ready', node.ready ? 1 : 0, nodeLabels);
+      for (const type of ['memory', 'disk', 'pid', 'network']) {
+        sample(lines, 'kubi_node_pressure', node.pressures?.[type] ? 1 : 0, { ...nodeLabels, type });
+      }
+      sample(lines, 'kubi_node_cpu_allocatable_cores', node.cpuAllocatableCores, nodeLabels);
+      sample(lines, 'kubi_node_memory_allocatable_bytes', node.memoryAllocatableBytes, nodeLabels);
+      if (snapshot.metrics?.available && finiteMetric(node.cpuUsageCores)) {
+        sample(lines, 'kubi_node_cpu_usage_cores', node.cpuUsageCores, nodeLabels);
+      }
+      if (snapshot.metrics?.available && finiteMetric(node.memoryUsageBytes)) {
+        sample(lines, 'kubi_node_memory_usage_bytes', node.memoryUsageBytes, nodeLabels);
+      }
+    }
+
+    for (const namespace of [...(snapshot.details.namespaces || [])].sort((left, right) => left.name.localeCompare(right.name))) {
+      const namespaceLabels = { context, namespace: namespace.name };
+      for (const phase of ['running', 'pending', 'succeeded', 'failed', 'unknown']) {
+        sample(lines, 'kubi_namespace_pods', namespace.phases?.[phase], { ...namespaceLabels, phase });
+      }
+      sample(lines, 'kubi_namespace_active_pods', namespace.activeReady, { ...namespaceLabels, state: 'ready' });
+      sample(lines, 'kubi_namespace_active_pods', namespace.activeNotReady, { ...namespaceLabels, state: 'not_ready' });
+      sample(lines, 'kubi_namespace_pod_cpu_requests_cores', namespace.cpuRequestsCores, namespaceLabels);
+      sample(lines, 'kubi_namespace_pod_cpu_limits_cores', namespace.cpuLimitsCores, namespaceLabels);
+      sample(lines, 'kubi_namespace_pod_memory_requests_bytes', namespace.memoryRequestsBytes, namespaceLabels);
+      sample(lines, 'kubi_namespace_pod_memory_limits_bytes', namespace.memoryLimitsBytes, namespaceLabels);
+      if (snapshot.metrics?.available && finiteMetric(namespace.cpuUsageCores)) {
+        sample(lines, 'kubi_namespace_pod_cpu_usage_cores', namespace.cpuUsageCores, namespaceLabels);
+      }
+      if (snapshot.metrics?.available && finiteMetric(namespace.memoryUsageBytes)) {
+        sample(lines, 'kubi_namespace_pod_memory_usage_bytes', namespace.memoryUsageBytes, namespaceLabels);
+      }
+    }
+
+    for (const workload of [...(snapshot.details.workloads || [])].sort((left, right) => {
+      return `${left.namespace}/${left.kind}/${left.name}`.localeCompare(`${right.namespace}/${right.kind}/${right.name}`);
+    })) {
+      const workloadLabels = {
+        context,
+        namespace: workload.namespace,
+        kind: workload.kind,
+        workload: workload.name
+      };
+      for (const state of ['desired', 'ready', 'available']) {
+        sample(lines, 'kubi_workload_replicas', workload[state], { ...workloadLabels, state });
+      }
+    }
   }
   return `${lines.join('\n')}\n`;
 }
@@ -157,7 +228,8 @@ export function createPrometheusExporter(options) {
   const selectorProvider = options.selectorProvider || resolveAgentRuntimeConfigForSelector;
   const snapshotProvider = options.snapshotProvider || loadLocalPrometheusSnapshot;
   const now = options.now || Date.now;
-  let collection = { durationSeconds: 0, lastSuccessTimestampSeconds: 0, contexts: [] };
+  const detailLevel = config.detailLevel || 'aggregate';
+  let collection = { detailLevel, durationSeconds: 0, lastSuccessTimestampSeconds: 0, contexts: [] };
   let rendered = renderPrometheusMetrics({ ...options, state, collection });
   let server = null;
   let interval = null;
@@ -186,7 +258,11 @@ export function createPrometheusExporter(options) {
               contextName: context,
               clusterFingerprint: candidate.clusterFingerprint
             });
-            return { context, up: true, snapshot: await snapshotProvider(selectedConfig) };
+            return {
+              context,
+              up: true,
+              snapshot: await snapshotProvider(selectedConfig, { detailLevel })
+            };
           } catch {
             state.errors.collection += 1;
             return { context, up: false };
@@ -197,6 +273,7 @@ export function createPrometheusExporter(options) {
       }
       const successful = contextResults.some((entry) => entry.up);
       collection = {
+        detailLevel,
         durationSeconds: Math.max(0, now() - startedAt) / 1000,
         lastSuccessTimestampSeconds: successful
           ? Math.floor(now() / 1000)
