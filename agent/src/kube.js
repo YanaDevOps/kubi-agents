@@ -3659,7 +3659,7 @@ function buildStorageProviders(storageClasses, csiDrivers, healthInput = {}) {
     const provider = {
       providerId: key,
       providerName: storageProviderName(key),
-      type: rawId.includes('csi') || key === 'rook-ceph' || key.includes('longhorn') ? 'csi' : 'platform',
+      type: rawId.includes('csi') || ['rook-ceph', 'driver.longhorn.io', 'openebs', 'portworx'].includes(key) ? 'csi' : 'platform',
       detected: true,
       configured: true,
       active: true,

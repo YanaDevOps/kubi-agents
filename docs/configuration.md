@@ -68,6 +68,20 @@ storage:
 #             timeout_seconds: 5
 #             auth:
 #               mode: none
+    openebs:
+      profiles: []
+      # - context: production
+      #   metrics_endpoints:
+      #     - url: https://openebs-metrics.internal/metrics
+      #       ca_file: /etc/kubi-agent/tls/openebs-ca.pem
+      #       client_cert_file: /etc/kubi-agent/tls/openebs-client.pem
+      #       client_key_file: /etc/kubi-agent/tls/openebs-client.key
+      #       bearer_token_file: /etc/kubi-agent/tokens/openebs
+    portworx:
+      profiles: []
+      # - context: "*"
+      #   metrics_endpoints:
+      #     - url: http://127.0.0.1:9001/metrics
 ```
 
 `kubeconfig_paths` accepts files from a cluster node or gateway host. Every API endpoint referenced by those files must already be reachable from that host. `kubeconfig_directories` scans `.yaml`, `.yml`, and `.conf` files.
@@ -100,4 +114,13 @@ If auto-discovery is incomplete, configure `endpoints` explicitly. The endpoint 
 
 Use a read-only etcd account where authentication is enabled. TLS settings are file paths, not inline certificate data. Agent configuration is installed with mode `0600`; `kubi-agent config show --effective` redacts passwords, bearer tokens, custom metric headers, and the pairing identity secret.
 
-`StorageClass.parameters.poolId` may provide a configured pool count when deep metrics are unavailable, but StorageClass data is never presented as capacity. Supported metric authentication modes are `none`, `basic`, `bearer`, and `headers`. Providers other than Vitastor currently show Kubernetes inventory and an explicit message that deep provider metrics are unavailable rather than returning an error.
+`StorageClass.parameters.poolId` may provide a configured pool count when deep metrics are unavailable, but StorageClass data is never presented as capacity. Supported Vitastor metric authentication modes are `none`, `basic`, `bearer`, and `headers`.
+
+OpenEBS and Portworx use recognized internal exporter Services automatically. Configure `metrics_endpoints`
+only when discovery is unavailable or the endpoint requires bearer or mTLS authentication. Exact context
+profiles take precedence over `*`; each profile accepts up to eight HTTP(S) endpoints. URLs cannot contain
+inline credentials, query strings, or fragments. Client certificate and key files must be configured
+together. Effective-config output redacts all credential and TLS paths. Restart the agent after changes.
+
+Rook/Ceph, Longhorn, OpenEBS, and Portworx retain Kubernetes/CRD health when an optional exporter is not
+reachable. Other providers show universal CSI inventory without claiming unavailable backend metrics.

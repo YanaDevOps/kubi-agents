@@ -4,7 +4,9 @@ import {
   canonicalStorageProviderId,
   normalizeCSINode,
   normalizeCSIStorageCapacity,
-  normalizeVolumeAttachment
+  normalizeVolumeAttachment,
+  storageProviderCapabilities,
+  storageProviderName
 } from '../src/shared/storage-health.js';
 
 describe('universal CSI storage health', () => {
@@ -38,5 +40,16 @@ describe('universal CSI storage health', () => {
       readyPluginPods: 1,
       topologyCapacitySamples: 1
     });
+  });
+
+  test('groups OpenEBS and Portworx aliases as deep-metrics providers', () => {
+    expect(canonicalStorageProviderId('io.openebs.csi-mayastor')).toBe('openebs');
+    expect(canonicalStorageProviderId('local.csi.openebs.io')).toBe('openebs');
+    expect(canonicalStorageProviderId('pxd.portworx.com')).toBe('portworx');
+    expect(canonicalStorageProviderId('pxd.openstorage.org')).toBe('portworx');
+    expect(storageProviderName('openebs')).toBe('OpenEBS');
+    expect(storageProviderName('portworx')).toBe('Portworx');
+    expect(storageProviderCapabilities('openebs').backendMetrics).toBe(true);
+    expect(storageProviderCapabilities('portworx').backendMetrics).toBe(true);
   });
 });

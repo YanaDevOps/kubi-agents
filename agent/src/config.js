@@ -228,6 +228,81 @@ function normalizeVitastorProfiles(settings) {
   };
 }
 
+function normalizeStorageMetricsProfiles(drivers, driverName) {
+  const driver = object(drivers[driverName], `storage.drivers.${driverName}`);
+  if (driver.profiles !== undefined && !Array.isArray(driver.profiles)) {
+    throw new Error(`storage.drivers.${driverName}.profiles must be a list.`);
+  }
+
+  const profiles = (driver.profiles || []).map((rawProfile, profileIndex) => {
+    const profileField = `storage.drivers.${driverName}.profiles[${profileIndex}]`;
+    const profile = object(rawProfile, profileField);
+    if (profile.metrics_endpoints !== undefined && !Array.isArray(profile.metrics_endpoints)) {
+      throw new Error(`${profileField}.metrics_endpoints must be a list.`);
+    }
+    if ((profile.metrics_endpoints || []).length > 8) {
+      throw new Error(`${profileField}.metrics_endpoints must not contain more than 8 entries.`);
+    }
+
+    const metricsEndpoints = (profile.metrics_endpoints || []).map((rawEndpoint, endpointIndex) => {
+      const field = `${profileField}.metrics_endpoints[${endpointIndex}]`;
+      const endpoint = object(rawEndpoint, field);
+      const value = optionalString(endpoint.url, `${field}.url`);
+      let parsed;
+      try {
+        parsed = new URL(value);
+      } catch {
+        throw new Error(`${field}.url must be a valid http or https URL.`);
+      }
+      if (!['http:', 'https:'].includes(parsed.protocol)) {
+        throw new Error(`${field}.url must use http or https.`);
+      }
+      if (parsed.username || parsed.password) {
+        throw new Error(`${field}.url must not include inline credentials.`);
+      }
+      if (parsed.search || parsed.hash) {
+        throw new Error(`${field}.url must not include query parameters or fragments.`);
+      }
+      const clientCertFile = optionalString(endpoint.client_cert_file, `${field}.client_cert_file`);
+      const clientKeyFile = optionalString(endpoint.client_key_file, `${field}.client_key_file`);
+      if (Boolean(clientCertFile) !== Boolean(clientKeyFile)) {
+        throw new Error(`${field}.client_cert_file and ${field}.client_key_file must be configured together.`);
+      }
+      return {
+        url: parsed.toString(),
+        caFile: optionalString(endpoint.ca_file, `${field}.ca_file`),
+        clientCertFile,
+        clientKeyFile,
+        bearerTokenFile: optionalString(endpoint.bearer_token_file, `${field}.bearer_token_file`)
+      };
+    });
+
+    return {
+      context: optionalString(profile.context, `${profileField}.context`, '*') || '*',
+      metricsEndpoints
+    };
+  });
+
+  const contexts = new Set();
+  for (const profile of profiles) {
+    if (contexts.has(profile.context)) {
+      throw new Error(`Duplicate ${driverName} profile context: ${profile.context}.`);
+    }
+    contexts.add(profile.context);
+  }
+  return { profiles };
+}
+
+function normalizeStorageDrivers(settings) {
+  const storage = object(settings.storage, 'storage');
+  const drivers = object(storage.drivers, 'storage.drivers');
+  return {
+    ...normalizeVitastorProfiles(settings),
+    openebs: normalizeStorageMetricsProfiles(drivers, 'openebs'),
+    portworx: normalizeStorageMetricsProfiles(drivers, 'portworx')
+  };
+}
+
 export function validateAgentSettings(settings) {
   const discovery = settings.discovery && typeof settings.discovery === 'object' ? settings.discovery : {};
   const logging = settings.logging && typeof settings.logging === 'object' ? settings.logging : {};
@@ -243,7 +318,7 @@ export function validateAgentSettings(settings) {
   if (file?.path !== undefined && (typeof file.path !== 'string' || !file.path.trim())) {
     throw new Error('logging.file.path must be a non-empty path.');
   }
-  const storageDrivers = normalizeVitastorProfiles(settings);
+  const storageDrivers = normalizeStorageDrivers(settings);
   const metricsExporter = normalizeMetricsExporter(settings);
   return {
     kubeconfigPaths,
@@ -307,6 +382,16 @@ export function redactAgentRuntimeConfig(runtimeConfig) {
       profile.metrics.auth.headers = Object.fromEntries(
         Object.keys(profile.metrics.auth.headers).map((name) => [name, '[redacted]'])
       );
+    }
+  }
+  for (const driverName of ['openebs', 'portworx']) {
+    for (const profile of clone.storageDrivers?.[driverName]?.profiles || []) {
+      for (const endpoint of profile.metricsEndpoints || []) {
+        if (endpoint.caFile) endpoint.caFile = '[redacted]';
+        if (endpoint.clientCertFile) endpoint.clientCertFile = '[redacted]';
+        if (endpoint.clientKeyFile) endpoint.clientKeyFile = '[redacted]';
+        if (endpoint.bearerTokenFile) endpoint.bearerTokenFile = '[redacted]';
+      }
     }
   }
   return clone;

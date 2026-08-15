@@ -3,7 +3,12 @@ import http from 'node:http';
 import https from 'node:https';
 import { execFile as nodeExecFile } from 'node:child_process';
 import { discoverLocalAccessCandidates, fetchKubeList, loadLocalKubeConfig, metadataFor } from './kube.js';
-import { loadCephStorageOverview, loadLonghornStorageOverview } from './storage-provider-adapters.js';
+import {
+  loadCephStorageOverview,
+  loadLonghornStorageOverview,
+  loadOpenEbsStorageOverview,
+  loadPortworxStorageOverview
+} from './storage-provider-adapters.js';
 
 const CLI_MAX_OUTPUT_BYTES = 4 * 1024 * 1024;
 
@@ -798,6 +803,12 @@ export async function loadLocalStorageDriverOverview(runtimeConfig, input = {}, 
   }
   if (/longhorn/i.test(driver)) {
     return loadLonghornStorageOverview(runtimeConfig, input, dependencies);
+  }
+  if (/openebs|mayastor|local\.csi\.openebs|zfs\.csi\.openebs/i.test(driver)) {
+    return loadOpenEbsStorageOverview(runtimeConfig, input, dependencies);
+  }
+  if (/portworx|pxd\.openstorage\.org/i.test(driver)) {
+    return loadPortworxStorageOverview(runtimeConfig, input, dependencies);
   }
   if (/vitastor/i.test(driver)) {
     return withStorageOverviewV2(await loadVitastorStorageDriverOverview(runtimeConfig, input, dependencies), 'vitastor');

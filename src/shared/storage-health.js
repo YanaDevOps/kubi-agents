@@ -27,6 +27,8 @@ export function canonicalStorageProviderId(value) {
   }
   if (source.includes('vitastor')) return 'csi.vitastor.io';
   if (source.includes('longhorn')) return 'driver.longhorn.io';
+  if (source.includes('openebs') || source.includes('mayastor')) return 'openebs';
+  if (source.includes('portworx') || source.includes('pxd.openstorage.org')) return 'portworx';
   return source;
 }
 
@@ -41,6 +43,8 @@ export function storageProviderName(value) {
   if (lower.includes('file.csi.azure.com')) return 'Azure File CSI';
   if (lower.includes('vitastor')) return 'Vitastor';
   if (lower.includes('longhorn')) return 'Longhorn';
+  if (lower === 'openebs') return 'OpenEBS';
+  if (lower === 'portworx') return 'Portworx';
   if (lower.includes('nfs')) return 'NFS';
   if (lower.includes('local-path')) return 'Local Path Provisioner';
   if (lower.includes('no-provisioner')) return 'Local Persistent Volumes';
@@ -123,7 +127,7 @@ export function normalizeCSIStorageCapacity(recordValue) {
 
 export function storageProviderCapabilities(providerId) {
   const id = canonicalStorageProviderId(providerId);
-  const backendMetrics = id === 'csi.vitastor.io' || id === 'rook-ceph' || id === 'driver.longhorn.io';
+  const backendMetrics = ['csi.vitastor.io', 'rook-ceph', 'driver.longhorn.io', 'openebs', 'portworx'].includes(id);
   return {
     kubernetesInventory: true,
     nodeRegistration: !id.includes('no-provisioner') && !id.includes('local-path'),
@@ -137,6 +141,8 @@ function providerPodAliases(providerId) {
   if (providerId === 'rook-ceph') return ['csi-rbdplugin', 'csi-cephfsplugin', 'rook-ceph-csi'];
   if (providerId === 'csi.vitastor.io') return ['csi-vitastor', 'vitastor-csi'];
   if (providerId === 'driver.longhorn.io') return ['longhorn-csi-plugin'];
+  if (providerId === 'openebs') return ['openebs', 'mayastor', 'io-engine', 'lvm-localpv', 'zfs-localpv'];
+  if (providerId === 'portworx') return ['portworx', 'px-cluster', 'px-storage', 'pxd'];
   return [];
 }
 

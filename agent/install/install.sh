@@ -122,6 +122,22 @@ storage:
       #     # metrics:
       #     #   scheme: http
       #     #   timeout_seconds: 5
+    # OpenEBS and Portworx exporters are auto-discovered on internal Services.
+    # Add a context profile only for authenticated or otherwise undiscoverable endpoints.
+    openebs:
+      profiles: []
+      # profiles:
+      #   - context: production
+      #     metrics_endpoints:
+      #       - url: https://openebs-metrics.internal/metrics
+      #         ca_file: /etc/kubi-agent/tls/openebs-ca.pem
+      #         bearer_token_file: /etc/kubi-agent/tokens/openebs
+    portworx:
+      profiles: []
+      # profiles:
+      #   - context: "*"
+      #     metrics_endpoints:
+      #       - url: http://127.0.0.1:9001/metrics
 
 logging:
   level: info

@@ -1,5 +1,6 @@
 import http from 'node:http';
 import https from 'node:https';
+import fs from 'node:fs';
 import net from 'node:net';
 import { fetchKubeList, loadLocalKubeConfig } from './kube.js';
 
@@ -38,6 +39,12 @@ function resourceList(items, fetchedAt) {
 }
 
 function baseOverview(driver, backendKind, fetchedAt) {
+  const providerIds = {
+    ceph: 'rook-ceph',
+    longhorn: 'driver.longhorn.io',
+    openebs: 'openebs',
+    portworx: 'portworx'
+  };
   return {
     schemaVersion: 2,
     namespaceScope: null,
@@ -48,7 +55,7 @@ function baseOverview(driver, backendKind, fetchedAt) {
     availableDrivers: [],
     driver: {
       name: driver,
-      providerId: backendKind === 'ceph' ? 'rook-ceph' : backendKind === 'longhorn' ? 'driver.longhorn.io' : driver,
+      providerId: providerIds[backendKind] || driver,
       type: 'csi',
       status: 'unknown',
       lastUpdate: fetchedAt,
@@ -106,13 +113,19 @@ function internalAddress(value) {
   return false;
 }
 
-function boundedGet(url, timeoutSeconds = METRICS_TIMEOUT_SECONDS) {
+function boundedGet(url, timeoutSeconds = METRICS_TIMEOUT_SECONDS, options = {}) {
   return new Promise((resolve, reject) => {
     const parsed = new URL(url);
     const transport = parsed.protocol === 'https:' ? https : http;
     const request = transport.get(parsed, {
       timeout: timeoutSeconds * 1000,
-      ...(parsed.protocol === 'https:' ? { rejectUnauthorized: true } : {})
+      headers: options.headers || {},
+      ...(parsed.protocol === 'https:' ? {
+        rejectUnauthorized: true,
+        ...(options.ca ? { ca: options.ca } : {}),
+        ...(options.cert ? { cert: options.cert } : {}),
+        ...(options.key ? { key: options.key } : {})
+      } : {})
     }, (response) => {
       if ((response.statusCode || 0) < 200 || (response.statusCode || 0) >= 300) {
         response.resume();
@@ -181,16 +194,27 @@ async function fetchLists(kubeConfig, paths) {
 function serviceMatches(provider, service) {
   const meta = metadata(service);
   const haystack = `${meta.namespace}/${meta.name} ${JSON.stringify(meta.labels)}`.toLowerCase();
-  return provider === 'ceph'
-    ? haystack.includes('rook-ceph') && (haystack.includes('mgr') || haystack.includes('exporter'))
-    : haystack.includes('longhorn') && (haystack.includes('backend') || haystack.includes('manager'));
+  if (provider === 'ceph') return haystack.includes('rook-ceph') && (haystack.includes('mgr') || haystack.includes('exporter'));
+  if (provider === 'longhorn') return haystack.includes('longhorn') && (haystack.includes('backend') || haystack.includes('manager'));
+  if (provider === 'openebs') {
+    return (haystack.includes('openebs') || haystack.includes('mayastor') || haystack.includes('io-engine')) &&
+      (haystack.includes('metric') || haystack.includes('pool') || haystack.includes('io-engine'));
+  }
+  if (provider === 'portworx') {
+    return (haystack.includes('portworx') || haystack.includes('px-')) &&
+      (haystack.includes('metric') || haystack.includes('prometheus') || haystack.includes('api'));
+  }
+  return false;
 }
 
 function allowedPort(provider, port, name) {
   const portNumber = Number(port);
   const portName = String(name || '').toLowerCase();
   if (provider === 'ceph') return portNumber === 9283 || portNumber === 9926 || portName.includes('metric');
-  return portNumber === 9500 || portName.includes('metric');
+  if (provider === 'longhorn') return portNumber === 9500 || portName.includes('metric');
+  if (provider === 'openebs') return portNumber === 9502 || portNumber === 9090 || portName.includes('metric');
+  if (provider === 'portworx') return [9001, 9028, 9090].includes(portNumber) || portName.includes('metric');
+  return false;
 }
 
 export function discoverStorageMetricEndpoints(provider, services, endpointSlices) {
@@ -232,16 +256,59 @@ export function discoverStorageMetricEndpoints(provider, services, endpointSlice
   return [...new Set(candidates)].slice(0, MAX_ENDPOINT_CANDIDATES);
 }
 
-async function loadMetrics(provider, services, endpointSlices, get = boundedGet) {
+function selectedMetricsProfile(runtimeConfig, provider) {
+  const profiles = runtimeConfig?.storageDrivers?.[provider]?.profiles || [];
+  const context = String(runtimeConfig?.kubeContext || '').trim();
+  return profiles.find((profile) => context && profile.context === context) || profiles.find((profile) => profile.context === '*') || null;
+}
+
+function configuredRequestOptions(endpoint) {
+  const read = (filename) => filename ? fs.readFileSync(filename) : undefined;
+  const bearerToken = endpoint.bearerTokenFile ? String(read(endpoint.bearerTokenFile) || '').trim() : '';
+  return {
+    ...(bearerToken ? { headers: { authorization: `Bearer ${bearerToken}` } } : {}),
+    ...(endpoint.caFile ? { ca: read(endpoint.caFile) } : {}),
+    ...(endpoint.clientCertFile ? { cert: read(endpoint.clientCertFile) } : {}),
+    ...(endpoint.clientKeyFile ? { key: read(endpoint.clientKeyFile) } : {})
+  };
+}
+
+function uniqueSamples(samples) {
+  const byIdentity = new Map();
+  for (const sample of samples) {
+    const labels = Object.entries(sample.labels || {}).sort(([left], [right]) => left.localeCompare(right));
+    const key = `${sample.name}|${JSON.stringify(labels)}`;
+    if (!byIdentity.has(key)) byIdentity.set(key, sample);
+  }
+  return [...byIdentity.values()];
+}
+
+async function loadMetrics(provider, services, endpointSlices, options = {}) {
   const errors = [];
-  for (const endpoint of discoverStorageMetricEndpoints(provider, services, endpointSlices)) {
+  const profile = selectedMetricsProfile(options.runtimeConfig, provider);
+  const configured = (profile?.metricsEndpoints || []).map((endpoint) => ({ ...endpoint, configured: true }));
+  const automatic = discoverStorageMetricEndpoints(provider, services, endpointSlices).map((url) => ({ url, configured: false }));
+  const candidates = [...configured, ...automatic].slice(0, MAX_ENDPOINT_CANDIDATES);
+  const successful = [];
+  const get = options.get || boundedGet;
+  for (const endpoint of candidates) {
     try {
-      return { endpoint, samples: parseStoragePrometheusMetrics(await get(endpoint)), errors };
+      const requestOptions = endpoint.configured ? configuredRequestOptions(endpoint) : {};
+      const payload = await get(endpoint.url, METRICS_TIMEOUT_SECONDS, requestOptions);
+      successful.push({ endpoint: endpoint.url, configured: endpoint.configured, samples: parseStoragePrometheusMetrics(payload) });
+      if (!options.aggregate) break;
     } catch (error) {
       errors.push(String(error instanceof Error ? error.message : error));
     }
   }
-  return { endpoint: '', samples: [], errors };
+  const first = successful[0];
+  return {
+    endpoint: first?.endpoint || '',
+    configured: first?.configured === true,
+    endpointCount: successful.length,
+    samples: uniqueSamples(successful.flatMap((entry) => entry.samples)),
+    errors
+  };
 }
 
 function cephStatus(cluster, samples) {
@@ -321,7 +388,10 @@ export async function loadCephStorageOverview(runtimeConfig, input = {}, depende
     '/api/v1/services',
     '/apis/discovery.k8s.io/v1/endpointslices'
   ]);
-  const metrics = await loadMetrics('ceph', services, endpointSlices, dependencies.getMetrics || boundedGet);
+  const metrics = await loadMetrics('ceph', services, endpointSlices, {
+    runtimeConfig,
+    get: dependencies.getMetrics || boundedGet
+  });
   const cluster = records(clusters)[0] || {};
   const clusterStatus = record(cluster.status);
   const ceph = record(clusterStatus.ceph);
@@ -471,7 +541,10 @@ export async function loadLonghornStorageOverview(runtimeConfig, input = {}, dep
       '/apis/longhorn.io/v1beta1/replicas'
     ]);
   }
-  const metrics = await loadMetrics('longhorn', services, endpointSlices, dependencies.getMetrics || boundedGet);
+  const metrics = await loadMetrics('longhorn', services, endpointSlices, {
+    runtimeConfig,
+    get: dependencies.getMetrics || boundedGet
+  });
   const rows = longhornRows(nodes, volumes, replicas, metrics.samples);
   const status = longhornStatus(rows);
   const nodeStatus = rows.nodeRows.some((item) => item.status === 'not ready') ? 'warning' : rows.nodeRows.length ? 'healthy' : 'unknown';
@@ -517,5 +590,345 @@ export async function loadLonghornStorageOverview(runtimeConfig, input = {}, dep
     : rows.nodeRows.length || rows.volumeRows.length
       ? 'Longhorn health loaded from CRDs. An unauthenticated internal metrics endpoint was not reachable.'
       : 'Longhorn CSI is detected, but Longhorn CRDs and Manager metrics are not available.';
+  return overview;
+}
+
+function bytes(value) {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : 0;
+  const match = String(value || '').trim().match(/^([0-9]+(?:\.[0-9]+)?)\s*([KMGTPE]i?B?|B)?$/i);
+  if (!match) return number(value);
+  const amount = Number(match[1]);
+  const unit = String(match[2] || 'B').toUpperCase();
+  const powers = { B: 0, K: 1, KB: 1, KIB: 1, M: 2, MB: 2, MIB: 2, G: 3, GB: 3, GIB: 3, T: 4, TB: 4, TIB: 4, P: 5, PB: 5, PIB: 5, E: 6, EB: 6, EIB: 6 };
+  const power = powers[unit] ?? 0;
+  const base = unit.includes('I') ? 1024 : 1000;
+  return amount * base ** power;
+}
+
+function currentStatus(value, fallback = 'unknown') {
+  return text(value, fallback).toLowerCase().replace(/[_\s]+/g, '-');
+}
+
+function metricsSource(metrics, fallback) {
+  if (metrics.endpoint) return metrics.configured ? 'configured-exporter' : 'auto-discovered-exporter';
+  return fallback;
+}
+
+function openEbsPoolRows(diskPools, samples) {
+  const rows = new Map();
+  const ensure = (name, node = '') => {
+    if (!name) return null;
+    const row = rows.get(name) || {
+      name,
+      node,
+      status: 'unknown',
+      usedBytes: 0,
+      totalBytes: 0,
+      committedBytes: 0,
+      ioErrors: 0,
+      ioStalled: false
+    };
+    if (!row.node && node) row.node = node;
+    rows.set(name, row);
+    return row;
+  };
+
+  for (const pool of records(diskPools)) {
+    const meta = metadata(pool);
+    const spec = record(pool.spec);
+    const status = record(pool.status);
+    const capacity = record(status.capacity);
+    const errorInfo = record(status.error_info || status.errorInfo);
+    const row = ensure(meta.name, text(spec.node));
+    row.status = currentStatus(status.state || status.phase || status.status, 'detected');
+    row.totalBytes = bytes(capacity.total ?? capacity.capacity ?? status.capacity ?? status.totalCapacity);
+    row.usedBytes = bytes(capacity.used ?? status.used ?? status.allocated);
+    const available = bytes(capacity.available ?? status.available);
+    if (!row.totalBytes && available) row.totalBytes = row.usedBytes + available;
+    row.committedBytes = bytes(capacity.committed ?? status.committed);
+    row.ioErrors = number(errorInfo.io_error_count ?? errorInfo.ioErrorCount);
+    row.ioStalled = errorInfo.io_stalled === true || errorInfo.ioStalled === true;
+  }
+
+  for (const sample of samples) {
+    if (!sample.name.startsWith('diskpool_')) continue;
+    const row = ensure(sample.labels.name || sample.labels.pool, sample.labels.node || '');
+    if (!row) continue;
+    if (sample.name === 'diskpool_status') row.status = ['unknown', 'online', 'degraded', 'faulted'][sample.value] || 'unknown';
+    if (sample.name === 'diskpool_total_size_bytes') row.totalBytes = sample.value;
+    if (sample.name === 'diskpool_used_size_bytes') row.usedBytes = sample.value;
+    if (sample.name === 'diskpool_committed_size_bytes') row.committedBytes = sample.value;
+  }
+  return [...rows.values()].sort((left, right) => left.name.localeCompare(right.name));
+}
+
+function localStorageRows(engine, nodes, volumes) {
+  const nodeRows = records(nodes).map((node) => {
+    const meta = metadata(node);
+    const status = record(node.status);
+    const pools = records(node.pools || status.pools);
+    return {
+      name: meta.name,
+      engine,
+      status: currentStatus(status.state || status.phase || status.status, 'ready'),
+      pools: pools.length
+    };
+  });
+  const volumeRows = records(volumes).map((volume) => {
+    const meta = metadata(volume);
+    const spec = record(volume.spec);
+    const status = record(volume.status);
+    return {
+      name: meta.name,
+      engine,
+      namespace: meta.namespace,
+      node: text(spec.ownerNodeID || spec.nodeID || spec.node),
+      status: currentStatus(status.state || status.phase || status.status, 'detected'),
+      sizeBytes: bytes(spec.capacity || spec.size || status.capacity)
+    };
+  });
+  return { nodeRows, volumeRows };
+}
+
+function openEbsStatus(poolRows, nodeRows, volumeRows) {
+  if (poolRows.some((row) => /faulted|offline/.test(row.status) || row.ioStalled)) return 'critical';
+  if (poolRows.some((row) => /degraded|suspected|warning|attention/.test(row.status))) return 'warning';
+  if (nodeRows.some((row) => /not-ready|offline|faulted/.test(row.status))) return 'warning';
+  if (volumeRows.some((row) => /faulted|offline|error/.test(row.status))) return 'critical';
+  if (poolRows.length || nodeRows.length || volumeRows.length) return 'healthy';
+  return 'unknown';
+}
+
+export async function loadOpenEbsStorageOverview(runtimeConfig, input = {}, dependencies = {}) {
+  const fetchedAt = new Date().toISOString();
+  const overview = baseOverview('OpenEBS', 'openebs', fetchedAt);
+  const kubeConfig = loadLocalKubeConfig(runtimeConfig);
+  let [diskPools, lvmNodes, lvmVolumes, zfsNodes, zfsVolumes, storageClasses, services, endpointSlices] = await fetchLists(kubeConfig, [
+    '/apis/openebs.io/v1beta3/diskpools',
+    '/apis/local.openebs.io/v1alpha1/lvmnodes',
+    '/apis/local.openebs.io/v1alpha1/lvmvolumes',
+    '/apis/zfs.openebs.io/v1/zfsnodes',
+    '/apis/zfs.openebs.io/v1/zfsvolumes',
+    '/apis/storage.k8s.io/v1/storageclasses',
+    '/api/v1/services',
+    '/apis/discovery.k8s.io/v1/endpointslices'
+  ]);
+  if (!diskPools.length) {
+    [diskPools] = await fetchLists(kubeConfig, ['/apis/openebs.io/v1beta2/diskpools']);
+  }
+  const metrics = await loadMetrics('openebs', services, endpointSlices, {
+    runtimeConfig,
+    aggregate: true,
+    get: dependencies.getMetrics || boundedGet
+  });
+  const poolRows = openEbsPoolRows(diskPools, metrics.samples);
+  const lvm = localStorageRows('LVM LocalPV', lvmNodes, lvmVolumes);
+  const zfs = localStorageRows('ZFS LocalPV', zfsNodes, zfsVolumes);
+  const localNodeRows = [...lvm.nodeRows, ...zfs.nodeRows];
+  const volumeRows = [...lvm.volumeRows, ...zfs.volumeRows];
+  const provisioners = new Set(records(storageClasses).map((item) => text(item.provisioner).toLowerCase()));
+  const engines = [
+    { name: 'Mayastor', detected: poolRows.length > 0 || provisioners.has('io.openebs.csi-mayastor'), pools: poolRows.length, nodes: new Set(poolRows.map((row) => row.node).filter(Boolean)).size, volumes: 0 },
+    { name: 'LVM LocalPV', detected: lvm.nodeRows.length > 0 || lvm.volumeRows.length > 0 || [...provisioners].some((item) => item.includes('lvm') && item.includes('openebs')), pools: 0, nodes: lvm.nodeRows.length, volumes: lvm.volumeRows.length },
+    { name: 'ZFS LocalPV', detected: zfs.nodeRows.length > 0 || zfs.volumeRows.length > 0 || [...provisioners].some((item) => item.includes('zfs') && item.includes('openebs')), pools: 0, nodes: zfs.nodeRows.length, volumes: zfs.volumeRows.length },
+    { name: 'Hostpath LocalPV', detected: provisioners.has('openebs.io/local'), pools: 0, nodes: 0, volumes: 0 }
+  ].filter((engine) => engine.detected).map(({ detected, ...engine }) => ({ ...engine, status: 'detected' }));
+  const status = openEbsStatus(poolRows, localNodeRows, volumeRows);
+  const totalBytes = poolRows.reduce((sum, row) => sum + row.totalBytes, 0);
+  const usedBytes = poolRows.reduce((sum, row) => sum + row.usedBytes, 0);
+
+  overview.driver.status = status;
+  overview.driver.metricsSource = metricsSource(metrics, engines.length ? 'openebs-crds' : 'kubernetes-inventory');
+  overview.driver.metricsSourceDetail = metrics.endpoint || undefined;
+  overview.summary.pools = poolRows.length;
+  overview.summary.capacity = { usedBytes, totalBytes };
+  overview.summary.rawCapacity = { usedBytes, totalBytes };
+  overview.io = {
+    readOps: sampleSum(metrics.samples, ['diskpool_num_read_ops']),
+    writeOps: sampleSum(metrics.samples, ['diskpool_num_write_ops'])
+  };
+  overview.backendSections = [
+    {
+      id: 'openebs-engines', title: 'OpenEBS engines', description: 'Detected replicated and local storage engines', status,
+      columns: [{ key: 'name', label: 'Engine' }, { key: 'status', label: 'Status', format: 'status' }, { key: 'nodes', label: 'Nodes', format: 'number' }, { key: 'pools', label: 'Pools', format: 'number' }, { key: 'volumes', label: 'Volumes', format: 'number' }], rows: engines
+    },
+    {
+      id: 'openebs-pools', title: 'Mayastor pools', description: 'Current pool capacity and I/O health', status,
+      columns: [{ key: 'name', label: 'Pool' }, { key: 'node', label: 'Node' }, { key: 'status', label: 'Status', format: 'status' }, { key: 'usedBytes', label: 'Used', format: 'bytes' }, { key: 'totalBytes', label: 'Total', format: 'bytes' }, { key: 'committedBytes', label: 'Committed', format: 'bytes' }, { key: 'ioErrors', label: 'I/O errors', format: 'number' }], rows: poolRows
+    },
+    {
+      id: 'openebs-local-nodes', title: 'LocalPV nodes', description: 'LVM and ZFS node inventory', status: localNodeRows.length ? 'healthy' : 'unknown',
+      columns: [{ key: 'name', label: 'Node' }, { key: 'engine', label: 'Engine' }, { key: 'status', label: 'Status', format: 'status' }, { key: 'pools', label: 'Pools', format: 'number' }], rows: localNodeRows
+    },
+    {
+      id: 'openebs-volumes', title: 'LocalPV volumes', description: 'LVM and ZFS volume state', status: volumeRows.length ? 'healthy' : 'unknown',
+      columns: [{ key: 'name', label: 'Volume' }, { key: 'engine', label: 'Engine' }, { key: 'namespace', label: 'Namespace' }, { key: 'node', label: 'Node' }, { key: 'status', label: 'Status', format: 'status' }, { key: 'sizeBytes', label: 'Size', format: 'bytes' }], rows: volumeRows
+    }
+  ].filter((section) => section.rows.length > 0);
+  overview.errors = metrics.errors;
+  overview.partial = metrics.errors.length > 0 && metrics.endpointCount === 0 && engines.length > 0;
+  overview.message = metrics.endpoint
+    ? `OpenEBS inventory and metrics loaded from ${metrics.endpointCount} exporter endpoint${metrics.endpointCount === 1 ? '' : 's'}.`
+    : engines.length
+      ? 'OpenEBS health loaded from Kubernetes CRDs. Exporter metrics are not available.'
+      : 'OpenEBS CSI is detected, but OpenEBS CRDs and exporter metrics are not available.';
+  return overview;
+}
+
+function portworxPoolRows(samples) {
+  const rows = new Map();
+  const ensure = (sample) => {
+    const name = sample.labels.pool || sample.labels.poolid || '';
+    if (!name) return null;
+    const key = `${sample.labels.node || sample.labels.nodeID || ''}/${name}`;
+    const row = rows.get(key) || { name, node: sample.labels.node || sample.labels.nodeID || '', status: 'unknown', usedBytes: 0, totalBytes: 0, provisionedBytes: 0 };
+    rows.set(key, row);
+    return row;
+  };
+  for (const sample of samples) {
+    if (!sample.name.startsWith('px_pool_stats_')) continue;
+    const row = ensure(sample);
+    if (!row) continue;
+    if (sample.name === 'px_pool_stats_status') row.status = ['offline', 'online', 'full', 'not-found', 'maintenance', 'degraded', 'background-activity'][sample.value] || 'unknown';
+    if (sample.name === 'px_pool_stats_total_bytes') row.totalBytes = sample.value;
+    if (sample.name === 'px_pool_stats_used_bytes') row.usedBytes = sample.value;
+    if (sample.name === 'px_pool_stats_provisioned_bytes') row.provisionedBytes = sample.value;
+  }
+  return [...rows.values()].sort((left, right) => `${left.node}/${left.name}`.localeCompare(`${right.node}/${right.name}`));
+}
+
+function portworxVolumeRows(samples) {
+  const rows = new Map();
+  const ensure = (sample) => {
+    const id = sample.labels.volume || sample.labels.volumeid || sample.labels.volume_id || '';
+    const name = sample.labels.volumename || sample.labels.pvc || id;
+    if (!id && !name) return null;
+    const key = id || name;
+    const row = rows.get(key) || { name, id, node: sample.labels.node || sample.labels.node_name || '', status: 'unknown', usedBytes: 0, totalBytes: 0, attached: false };
+    rows.set(key, row);
+    return row;
+  };
+  for (const sample of samples) {
+    if (!sample.name.startsWith('px_volume_')) continue;
+    const row = ensure(sample);
+    if (!row) continue;
+    if (sample.name === 'px_volume_capacity_bytes' || sample.name === 'px_volume_fs_capacity_bytes') row.totalBytes = sample.value;
+    if (sample.name === 'px_volume_usage_bytes' || sample.name === 'px_volume_fs_usage_bytes') row.usedBytes = sample.value;
+    if (sample.name === 'px_volume_attached') row.attached = sample.value > 0;
+    if (sample.name === 'px_volume_replication_status') row.status = ['healthy', 'not-in-quorum', 'resync', 'degraded', 'detached', 'restore'][sample.value] || 'unknown';
+    if (sample.name === 'px_volume_fs_health_status' && sample.value > 0) row.status = 'filesystem-unhealthy';
+  }
+  return [...rows.values()].sort((left, right) => left.name.localeCompare(right.name));
+}
+
+function portworxConnectionRows(samples) {
+  const pairs = [
+    ['iscsi', 'px_csi_node_iscsi_sessions', 'px_csi_node_iscsi_sessions_healthy'],
+    ['nvme', 'px_csi_node_nvme_connections', 'px_csi_node_nvme_connections_healthy'],
+    ['fc-hosts', 'px_csi_node_fc_hosts', 'px_csi_node_fc_hosts_online'],
+    ['fc-rports', 'px_csi_node_fc_rports', 'px_csi_node_fc_rports_online'],
+    ['multipath', 'px_csi_multipath_device_total_paths', 'px_csi_multipath_device_healthy_paths']
+  ];
+  const rows = [];
+  for (const [protocol, totalMetric, healthyMetric] of pairs) {
+    const totals = sampleValues(samples, [totalMetric]);
+    for (const total of totals) {
+      const identity = {
+        node: total.labels.node_name || total.labels.node || '',
+        transport: total.labels.transport_type || '',
+        volume: total.labels.volume_id || ''
+      };
+      const healthy = sampleValues(samples, [healthyMetric]).find((sample) =>
+        (sample.labels.node_name || sample.labels.node || '') === identity.node &&
+        (sample.labels.transport_type || '') === identity.transport &&
+        (sample.labels.volume_id || '') === identity.volume
+      );
+      rows.push({
+        name: [protocol, identity.transport, identity.volume].filter(Boolean).join(' / '),
+        node: identity.node,
+        status: healthy && healthy.value >= total.value ? 'healthy' : total.value === 0 ? 'not-configured' : 'degraded',
+        healthy: healthy?.value || 0,
+        total: total.value
+      });
+    }
+  }
+  return rows.sort((left, right) => `${left.node}/${left.name}`.localeCompare(`${right.node}/${right.name}`));
+}
+
+function portworxStatus(clusters, nodes, pools, volumes, connections, samples) {
+  const storageDown = sampleSum(samples, ['px_cluster_status_nodes_storage_down']);
+  const offline = sampleSum(samples, ['px_cluster_status_nodes_offline', 'px_cluster_status_storage_nodes_offline']);
+  if (storageDown > 0 || pools.some((row) => /offline|full|not-found/.test(row.status)) || volumes.some((row) => /not-in-quorum|filesystem-unhealthy/.test(row.status))) return 'critical';
+  if (offline > 0 || pools.some((row) => /degraded/.test(row.status)) || volumes.some((row) => /resync|degraded/.test(row.status)) || connections.some((row) => row.status === 'degraded')) return 'warning';
+  if (records(clusters).some((cluster) => /error|offline|failed/.test(currentStatus(record(cluster.status).phase || record(cluster.status).status)))) return 'critical';
+  if (records(nodes).some((node) => /error|offline|failed/.test(currentStatus(record(node.status).phase || record(node.status).status)))) return 'warning';
+  if (records(clusters).length || records(nodes).length || pools.length || volumes.length) return 'healthy';
+  return 'unknown';
+}
+
+export async function loadPortworxStorageOverview(runtimeConfig, input = {}, dependencies = {}) {
+  const fetchedAt = new Date().toISOString();
+  const overview = baseOverview('Portworx', 'portworx', fetchedAt);
+  const kubeConfig = loadLocalKubeConfig(runtimeConfig);
+  const [clusters, storageNodes, services, endpointSlices] = await fetchLists(kubeConfig, [
+    '/apis/core.libopenstorage.org/v1/storageclusters',
+    '/apis/core.libopenstorage.org/v1/storagenodes',
+    '/api/v1/services',
+    '/apis/discovery.k8s.io/v1/endpointslices'
+  ]);
+  const metrics = await loadMetrics('portworx', services, endpointSlices, {
+    runtimeConfig,
+    aggregate: true,
+    get: dependencies.getMetrics || boundedGet
+  });
+  const nodeRows = records(storageNodes).map((node) => {
+    const meta = metadata(node);
+    const status = record(node.status);
+    return { name: meta.name, status: currentStatus(status.phase || status.status || status.state, 'detected'), version: text(status.version) };
+  });
+  const poolRows = portworxPoolRows(metrics.samples);
+  const volumeRows = portworxVolumeRows(metrics.samples);
+  const connectionRows = portworxConnectionRows(metrics.samples);
+  const status = portworxStatus(clusters, storageNodes, poolRows, volumeRows, connectionRows, metrics.samples);
+  const poolTotal = poolRows.reduce((sum, row) => sum + row.totalBytes, 0);
+  const poolUsed = poolRows.reduce((sum, row) => sum + row.usedBytes, 0);
+  const clusterTotal = sampleSum(metrics.samples, ['px_cluster_disk_total_bytes']);
+  const clusterUsed = sampleSum(metrics.samples, ['px_cluster_disk_utilized_bytes']);
+
+  overview.driver.status = status;
+  overview.driver.metricsSource = metricsSource(metrics, records(clusters).length || nodeRows.length ? 'portworx-crds' : 'kubernetes-inventory');
+  overview.driver.metricsSourceDetail = metrics.endpoint || undefined;
+  overview.summary.pools = poolRows.length;
+  overview.summary.capacity = { usedBytes: poolUsed || clusterUsed, totalBytes: poolTotal || clusterTotal };
+  overview.summary.rawCapacity = { ...overview.summary.capacity };
+  overview.io = {
+    readOps: sampleSum(metrics.samples, ['px_volume_read_iops']),
+    writeOps: sampleSum(metrics.samples, ['px_volume_write_iops'])
+  };
+  overview.backendSections = [
+    {
+      id: 'portworx-nodes', title: 'Portworx nodes', description: 'Storage node readiness', status,
+      columns: [{ key: 'name', label: 'Node' }, { key: 'status', label: 'Status', format: 'status' }, { key: 'version', label: 'Version' }], rows: nodeRows
+    },
+    {
+      id: 'portworx-pools', title: 'Portworx pools', description: 'Pool capacity and current state', status,
+      columns: [{ key: 'name', label: 'Pool' }, { key: 'node', label: 'Node' }, { key: 'status', label: 'Status', format: 'status' }, { key: 'usedBytes', label: 'Used', format: 'bytes' }, { key: 'totalBytes', label: 'Total', format: 'bytes' }, { key: 'provisionedBytes', label: 'Provisioned', format: 'bytes' }], rows: poolRows
+    },
+    {
+      id: 'portworx-volumes', title: 'Portworx volumes', description: 'Volume capacity, replication, and attachment state', status,
+      columns: [{ key: 'name', label: 'Volume' }, { key: 'node', label: 'Node' }, { key: 'status', label: 'Status', format: 'status' }, { key: 'attached', label: 'Attached' }, { key: 'usedBytes', label: 'Used', format: 'bytes' }, { key: 'totalBytes', label: 'Total', format: 'bytes' }], rows: volumeRows
+    },
+    {
+      id: 'portworx-connections', title: 'Host storage connections', description: 'iSCSI, NVMe, FC, and multipath health', status: connectionRows.some((row) => row.status === 'degraded') ? 'warning' : connectionRows.length ? 'healthy' : 'unknown',
+      columns: [{ key: 'name', label: 'Connection' }, { key: 'node', label: 'Node' }, { key: 'status', label: 'Status', format: 'status' }, { key: 'healthy', label: 'Healthy', format: 'number' }, { key: 'total', label: 'Total', format: 'number' }], rows: connectionRows
+    }
+  ].filter((section) => section.rows.length > 0);
+  overview.errors = metrics.errors;
+  overview.partial = metrics.errors.length > 0 && metrics.endpointCount === 0 && (records(clusters).length > 0 || nodeRows.length > 0);
+  overview.message = metrics.endpoint
+    ? `Portworx inventory and metrics loaded from ${metrics.endpointCount} exporter endpoint${metrics.endpointCount === 1 ? '' : 's'}.`
+    : records(clusters).length || nodeRows.length
+      ? 'Portworx health loaded from Kubernetes CRDs. Exporter metrics are not available.'
+      : 'Portworx CSI is detected, but Portworx CRDs and exporter metrics are not available.';
   return overview;
 }

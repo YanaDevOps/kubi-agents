@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { loadAgentSettings, resolveAgentRuntimeConfig, validateAgentSettings } from '../agent/src/config.js';
+import { loadAgentSettings, redactAgentRuntimeConfig, resolveAgentRuntimeConfig, validateAgentSettings } from '../agent/src/config.js';
 import { createAgentLogger } from '../agent/src/logger.js';
 
 function withTemporaryDirectory(run) {
@@ -48,6 +48,8 @@ discovery:
         tls: { certFile: '', keyFile: '' }
       },
       storageDrivers: {
+        openebs: { profiles: [] },
+        portworx: { profiles: [] },
         vitastor: {
           cli: {
             enabled: true,
@@ -169,6 +171,49 @@ discovery:
         auth: { mode: 'bearer', bearerToken: 'metrics-secret' }
       }
     });
+  });
+
+  test('validates and redacts context-scoped storage exporter endpoints', () => {
+    const validated = validateAgentSettings({
+      storage: {
+        drivers: {
+          openebs: {
+            profiles: [{
+              context: 'production',
+              metrics_endpoints: [{
+                url: 'https://openebs.internal/metrics',
+                ca_file: '/etc/kubi-agent/tls/ca.pem',
+                client_cert_file: '/etc/kubi-agent/tls/client.pem',
+                client_key_file: '/etc/kubi-agent/tls/client.key',
+                bearer_token_file: '/etc/kubi-agent/tokens/openebs'
+              }]
+            }]
+          },
+          portworx: {
+            profiles: [{ context: '*', metrics_endpoints: [{ url: 'http://127.0.0.1:9001/metrics' }] }]
+          }
+        }
+      }
+    });
+
+    expect(validated.storageDrivers.openebs.profiles[0].metricsEndpoints[0]).toMatchObject({
+      url: 'https://openebs.internal/metrics',
+      caFile: '/etc/kubi-agent/tls/ca.pem',
+      bearerTokenFile: '/etc/kubi-agent/tokens/openebs'
+    });
+    expect(validated.storageDrivers.portworx.profiles[0].context).toBe('*');
+    const redacted = JSON.stringify(redactAgentRuntimeConfig({
+      agentSecret: 'agent-secret',
+      storageDrivers: validated.storageDrivers
+    }));
+    expect(redacted).not.toContain('/etc/kubi-agent/tokens/openebs');
+    expect(redacted).not.toContain('/etc/kubi-agent/tls/client.key');
+    expect(() => validateAgentSettings({
+      storage: { drivers: { openebs: { profiles: [{ metrics_endpoints: [{ url: 'https://user:secret@example.com/metrics' }] }] } } }
+    })).toThrow('must not include inline credentials');
+    expect(() => validateAgentSettings({
+      storage: { drivers: { portworx: { profiles: [{ metrics_endpoints: [{ url: 'https://px.internal/metrics', client_cert_file: '/cert.pem' }] }] } } }
+    })).toThrow('must be configured together');
   });
 
   test('redacts credentials from optional rotating file logs', () => withTemporaryDirectory((directory) => {

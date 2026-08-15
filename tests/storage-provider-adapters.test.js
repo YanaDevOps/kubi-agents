@@ -1,9 +1,12 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import http from 'node:http';
+import { loadLocalStorageDriverOverview } from '../agent/src/storage-drivers.js';
 import {
   discoverStorageMetricEndpoints,
   loadCephStorageOverview,
   loadLonghornStorageOverview,
+  loadOpenEbsStorageOverview,
+  loadPortworxStorageOverview,
   parseStoragePrometheusMetrics
 } from '../agent/src/storage-provider-adapters.js';
 
@@ -80,5 +83,77 @@ describe('storage provider adapters', () => {
     const overview = await loadLonghornStorageOverview(runtimeConfig(endpoint), {}, { getMetrics: async () => '' });
     expect(overview.driver).toMatchObject({ backendKind: 'longhorn', status: 'healthy' });
     expect(overview.backendSections.map((section) => section.id)).toContain('longhorn-volumes');
+  });
+
+  test('combines OpenEBS CRDs with Mayastor exporter metrics', async () => {
+    const endpoint = await apiServer({
+      '/apis/openebs.io/v1beta3/diskpools': [{
+        metadata: { name: 'pool-a', namespace: 'openebs' },
+        spec: { node: 'worker-a' },
+        status: { state: 'Online', capacity: 1000, used: 250, committed: 400 }
+      }],
+      '/apis/local.openebs.io/v1alpha1/lvmnodes': [{ metadata: { name: 'worker-b' }, status: { state: 'Ready' } }],
+      '/api/v1/services': [service('openebs-io-engine-metrics', 'openebs', 9502)],
+      '/apis/discovery.k8s.io/v1/endpointslices': [endpointSlice('io-engine', 'openebs', 'openebs-io-engine-metrics', 9502)]
+    });
+    const overview = await loadOpenEbsStorageOverview(runtimeConfig(endpoint), {}, {
+      getMetrics: async () => [
+        'diskpool_status{node="worker-a",name="pool-a"} 1',
+        'diskpool_total_size_bytes{node="worker-a",name="pool-a"} 1000',
+        'diskpool_used_size_bytes{node="worker-a",name="pool-a"} 250',
+        'diskpool_num_read_ops{node="worker-a",name="pool-a"} 18',
+        'diskpool_num_write_ops{node="worker-a",name="pool-a"} 9'
+      ].join('\n')
+    });
+
+    expect(overview.driver).toMatchObject({ backendKind: 'openebs', status: 'healthy' });
+    expect(overview.summary.capacity).toEqual({ usedBytes: 250, totalBytes: 1000 });
+    expect(overview.io).toEqual({ readOps: 18, writeOps: 9 });
+    expect(overview.backendSections.map((section) => section.id)).toEqual([
+      'openebs-engines',
+      'openebs-pools',
+      'openebs-local-nodes'
+    ]);
+  });
+
+  test('normalizes Portworx pools, volumes, I/O and connection health', async () => {
+    const endpoint = await apiServer({
+      '/apis/core.libopenstorage.org/v1/storageclusters': [{ metadata: { name: 'px-cluster' }, status: { phase: 'Online' } }],
+      '/apis/core.libopenstorage.org/v1/storagenodes': [{ metadata: { name: 'worker-a' }, status: { phase: 'Online' } }],
+      '/api/v1/services': [service('portworx-metrics', 'portworx', 9001)],
+      '/apis/discovery.k8s.io/v1/endpointslices': [endpointSlice('portworx', 'portworx', 'portworx-metrics', 9001)]
+    });
+    const overview = await loadPortworxStorageOverview(runtimeConfig(endpoint), {}, {
+      getMetrics: async () => [
+        'px_pool_stats_status{node="worker-a",pool="pool-0"} 1',
+        'px_pool_stats_total_bytes{node="worker-a",pool="pool-0"} 2000',
+        'px_pool_stats_used_bytes{node="worker-a",pool="pool-0"} 500',
+        'px_volume_capacity_bytes{node="worker-a",volume="vol-a",volumename="data"} 1000',
+        'px_volume_usage_bytes{node="worker-a",volume="vol-a",volumename="data"} 200',
+        'px_volume_replication_status{node="worker-a",volume="vol-a",volumename="data"} 0',
+        'px_volume_read_iops{node="worker-a",volume="vol-a"} 12',
+        'px_volume_write_iops{node="worker-a",volume="vol-a"} 7',
+        'px_csi_node_iscsi_sessions{node_name="worker-a"} 2',
+        'px_csi_node_iscsi_sessions_healthy{node_name="worker-a"} 2'
+      ].join('\n')
+    });
+
+    expect(overview.driver).toMatchObject({ backendKind: 'portworx', status: 'healthy' });
+    expect(overview.summary.capacity).toEqual({ usedBytes: 500, totalBytes: 2000 });
+    expect(overview.io).toEqual({ readOps: 12, writeOps: 7 });
+    expect(overview.backendSections.map((section) => section.id)).toEqual([
+      'portworx-nodes',
+      'portworx-pools',
+      'portworx-volumes',
+      'portworx-connections'
+    ]);
+  });
+
+  test('routes OpenEBS and Portworx CSI aliases to deep adapters', async () => {
+    const endpoint = await apiServer({});
+    const openebs = await loadLocalStorageDriverOverview(runtimeConfig(endpoint), { driver: 'io.openebs.csi-mayastor' }, { getMetrics: async () => '' });
+    const portworx = await loadLocalStorageDriverOverview(runtimeConfig(endpoint), { driver: 'pxd.openstorage.org' }, { getMetrics: async () => '' });
+    expect(openebs.driver.backendKind).toBe('openebs');
+    expect(portworx.driver.backendKind).toBe('portworx');
   });
 });

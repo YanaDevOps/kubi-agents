@@ -22,6 +22,10 @@ permissions produce partial data instead of failing the whole Storage page.
   internal Ceph manager or exporter `/metrics` endpoint.
 - **Longhorn:** Node, Volume, and Replica CRDs, optionally enriched from the Longhorn Manager `/metrics`
   endpoint. v1beta2 is preferred and v1beta1 remains a compatibility fallback.
+- **OpenEBS:** DiskPool, LVM, and ZFS CRDs for Mayastor and LocalPV engines, optionally enriched from
+  recognized pool exporters for capacity, state, and read/write operations.
+- **Portworx:** StorageCluster and StorageNode CRDs, optionally enriched from Portworx metrics for pools,
+  volumes, I/O, and iSCSI/NVMe/Fibre Channel/multipath connection health.
 
 Cloud CSI, NFS, local-path, and other providers retain universal Kubernetes health without requiring cloud
 credentials or displaying backend concepts they do not implement.
@@ -31,8 +35,9 @@ credentials or displaying backend concepts they do not implement.
 Exporter discovery accepts only recognized provider Services and EndpointSlices with loopback, link-local,
 RFC1918, carrier-grade NAT, or IPv6 ULA addresses. Each read has a three-second timeout and 4 MiB response
 limit, and at most eight candidates are tried. Arbitrary URLs cannot be supplied through SaaS, and
-Kubernetes Secrets are never read. Authenticated exporters are skipped while CRD and Kubernetes health
-remain available.
+Kubernetes Secrets are never read. Operators may add context-scoped OpenEBS or Portworx endpoints in
+`/etc/kubi-agent/agent.yaml`; bearer and mTLS files are read only on the agent host. Authenticated
+auto-discovered exporters are skipped while CRD and Kubernetes health remain available.
 
 The kubeconfig identity should have list access to these optional resources for complete diagnostics:
 
@@ -42,6 +47,10 @@ core: persistentvolumes, persistentvolumeclaims, nodes, pods, services
 discovery.k8s.io: endpointslices
 ceph.rook.io: cephclusters, cephblockpools, cephfilesystems
 longhorn.io: nodes, volumes, replicas
+openebs.io: diskpools
+local.openebs.io: lvmnodes, lvmvolumes
+zfs.openebs.io: zfsnodes, zfsvolumes
+core.libopenstorage.org: storageclusters, storagenodes
 ```
 
 Provider CRD permissions are needed only when that provider is installed. `nodes/proxy` remains optional
