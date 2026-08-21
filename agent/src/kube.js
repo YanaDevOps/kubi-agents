@@ -2658,11 +2658,10 @@ function buildRuntimeServiceMeshInventory(namespaces, pods, deployments, service
     runtimeProvider('linkerd', 'Linkerd', runtimeProviderEvidence(crds, pods, deployments, (value) => /linkerd\.io|linkerd-proxy|linkerd-destination/i.test(value))),
     runtimeProvider('consul', 'Consul Connect', runtimeProviderEvidence(crds, pods, deployments, (value) => /consul\.hashicorp\.com|consul/i.test(value))),
     runtimeProvider('kuma', 'Kuma', runtimeProviderEvidence(crds, pods, deployments, (value) => /kuma\.io|kuma-sidecar|kuma-dp/i.test(value))),
-    runtimeProvider('cilium', 'Cilium Service Mesh', runtimeProviderEvidence(crds, pods, deployments, (value) => /cilium\.io|cilium/i.test(value))),
-    runtimeProvider('gateway-api', 'Gateway API', runtimeProviderEvidence(crds, pods, deployments, (value) => /gateway\.networking\.k8s\.io/i.test(value)))
+    runtimeProvider('cilium', 'Cilium Service Mesh', runtimeProviderEvidence(crds, pods, deployments, (value) => /cilium(?:clusterwide)?envoyconfig|cilium-envoy|cilium service mesh/i.test(value)))
   ].filter(Boolean);
   const normalizedPods = asRecordArray(pods).map(normalizeRuntimePod);
-  const meshPods = normalizedPods.filter((pod) => runtimePodHasMeshSidecar(pod) || /istio|linkerd|consul|kuma|cilium|envoy/i.test(`${pod.namespace}/${pod.name}`));
+  const meshPods = normalizedPods.filter((pod) => runtimePodHasMeshSidecar(pod) || /istio|linkerd|consul|kuma|cilium-envoy|envoy/i.test(`${pod.namespace}/${pod.name}`));
   const sidecarPods = normalizedPods.filter(runtimePodHasMeshSidecar);
   const meshNamespaceNames = new Set(meshPods.map((pod) => pod.namespace));
   const meshNamespaces = asRecordArray(namespaces)
@@ -3455,6 +3454,7 @@ export function isReliablePVCUsageSample(sample, declaredCapacityBytes) {
 async function loadPVCUsage(kubeConfig) {
   let nodes;
   let pods = [];
+  let podInventoryAvailable = false;
   try {
     const requests = await Promise.allSettled([
       fetchKubeList(kubeConfig, '/api/v1/nodes'),
@@ -3463,6 +3463,7 @@ async function loadPVCUsage(kubeConfig) {
     if (requests[0].status === 'rejected') throw requests[0].reason;
     nodes = requests[0].value;
     pods = requests[1].status === 'fulfilled' ? asRecordArray(requests[1].value.items) : [];
+    podInventoryAvailable = requests[1].status === 'fulfilled';
   } catch (error) {
     const message = sanitizeKubeError(error);
     return {
@@ -3474,6 +3475,10 @@ async function loadPVCUsage(kubeConfig) {
         missingPermissions: message.includes('HTTP 403') ? ['nodes/proxy'] : [],
         sampledNodes: 0,
         failedNodes: 0,
+        rawSamples: 0,
+        usableSamples: 0,
+        mountedClaims: 0,
+        podInventoryAvailable: false,
         message: message.includes('HTTP 403')
           ? 'PVC usage requires read access to the nodes/proxy subresource.'
           : 'PVC usage could not be sampled from cluster nodes.'
@@ -3536,6 +3541,10 @@ async function loadPVCUsage(kubeConfig) {
       missingPermissions: permissionDenied ? ['nodes/proxy'] : [],
       sampledNodes,
       failedNodes,
+      rawSamples: usage.size,
+      usableSamples: 0,
+      mountedClaims: mountedByPods.size,
+      podInventoryAvailable,
       message: available
         ? partial
           ? `PVC usage sampled from ${sampledNodes} node(s); ${failedNodes} node(s) were unavailable.`
@@ -4078,7 +4087,11 @@ export async function loadLocalStorage(runtimeConfig, namespaceScope = null) {
         return {
           ...claim,
           mountedByPods: mounted,
-          ...(sample ? { usageUnavailableReason: 'Kubelet reported filesystem capacity that does not match this PVC.' } : {})
+          usageUnavailableReason: sample
+            ? 'Kubelet reported filesystem capacity that does not match this PVC.'
+            : mounted.length
+              ? 'Kubelet summary was reachable but exposed no usable filesystem sample for this mounted PVC.'
+              : 'This PVC is not mounted by an active Pod, so kubelet does not report filesystem usage.'
         };
       }
       validUsageCount += 1;
@@ -4110,13 +4123,16 @@ export async function loadLocalStorage(runtimeConfig, namespaceScope = null) {
       available: usageAvailable,
       partial: usagePartial,
       discardedSamples,
+      usableSamples: validUsageCount,
       message: usageAvailable
         ? usagePartial
           ? `PVC usage is partial; ${pvcUsage.status.failedNodes} node(s) were unavailable and ${discardedSamples} unreliable sample(s) were ignored.`
           : `PVC usage sampled from ${pvcUsage.status.sampledNodes} node(s).`
         : discardedSamples > 0
           ? `PVC usage is unavailable because ${discardedSamples} kubelet sample(s) did not match the declared volume capacity.`
-          : pvcUsage.status.message
+          : pvcUsage.status.rawSamples === 0 && pvcUsage.status.sampledNodes > 0
+            ? `Kubelet summary was reachable on ${pvcUsage.status.sampledNodes} node(s), but it exposed no usable PVC filesystem samples.`
+            : pvcUsage.status.message
     };
 
     return {
@@ -4503,6 +4519,9 @@ function parseDeliveryApplication(definition, record) {
   const conditions = deliveryConditions(record);
   const updatedAt = deliveryUpdatedAt(record, conditions);
   if (definition.providerId === 'argocd') {
+    const spec = asRecord(record.spec);
+    const firstSource = asRecordArray(spec?.sources).find((source) => stringOrUndefined(source.repoURL));
+    const sourceRef = stringOrUndefined(asRecord(spec?.source)?.repoURL) || stringOrUndefined(firstSource?.repoURL);
     return {
       providerId: definition.providerId,
       providerName: definition.providerName,
@@ -4513,7 +4532,7 @@ function parseDeliveryApplication(definition, record) {
       health: deliveryNestedString(record, ['status', 'health', 'status']) || 'Unknown',
       revision: deliveryNestedString(record, ['status', 'sync', 'revision']),
       updatedAt,
-      sourceRef: sanitizeDeliverySourceUrl(deliveryNestedString(record, ['spec', 'source', 'repoURL'])),
+      sourceRef: sanitizeDeliverySourceUrl(sourceRef),
       conditions
     };
   }
@@ -5439,15 +5458,15 @@ export async function loadLocalComponentInventory(runtimeConfig) {
         'observability',
         'Loki evidence from server workloads or loki.grafana.com CRDs.',
         [
-          ...matchDeploymentEvidence(deployments, (_meta, record) =>
+          ...matchDeploymentEvidence(deployments, (meta, record) =>
             !workloadHasHelperIdentity(record, ['loki-canary', 'loki-operator']) &&
             (workloadHasImage(record, ['grafana/loki']) || workloadHasIdentity(record, ['loki']))
           ),
-          ...matchStatefulSetEvidence(statefulSets, (record) =>
-            !workloadHasHelperIdentity(record, ['loki-canary', 'loki-operator']) &&
-            (workloadHasImage(record, ['grafana/loki']) || workloadHasIdentity(record, ['loki']))
-          ),
-          ...matchDaemonSetEvidence(daemonSets, (_meta, record) =>
+          ...matchStatefulSetEvidence(statefulSets, (record) => {
+            return !workloadHasHelperIdentity(record, ['loki-canary', 'loki-operator']) &&
+              (workloadHasImage(record, ['grafana/loki']) || workloadHasIdentity(record, ['loki']));
+          }),
+          ...matchDaemonSetEvidence(daemonSets, (meta, record) =>
             !workloadHasHelperIdentity(record, ['loki-canary', 'loki-operator']) &&
             (workloadHasImage(record, ['grafana/loki']) || workloadHasIdentity(record, ['loki']))
           ),
@@ -5460,15 +5479,15 @@ export async function loadLocalComponentInventory(runtimeConfig) {
         'observability',
         'Tempo evidence from server workloads or tempo.grafana.com CRDs.',
         [
-          ...matchDeploymentEvidence(deployments, (_meta, record) =>
+          ...matchDeploymentEvidence(deployments, (meta, record) =>
             !workloadHasHelperIdentity(record, ['tempo-operator']) &&
             (workloadHasImage(record, ['grafana/tempo']) || workloadHasIdentity(record, ['tempo']))
           ),
-          ...matchStatefulSetEvidence(statefulSets, (record) =>
-            !workloadHasHelperIdentity(record, ['tempo-operator']) &&
-            (workloadHasImage(record, ['grafana/tempo']) || workloadHasIdentity(record, ['tempo']))
-          ),
-          ...matchDaemonSetEvidence(daemonSets, (_meta, record) =>
+          ...matchStatefulSetEvidence(statefulSets, (record) => {
+            return !workloadHasHelperIdentity(record, ['tempo-operator']) &&
+              (workloadHasImage(record, ['grafana/tempo']) || workloadHasIdentity(record, ['tempo']));
+          }),
+          ...matchDaemonSetEvidence(daemonSets, (meta, record) =>
             !workloadHasHelperIdentity(record, ['tempo-operator']) &&
             (workloadHasImage(record, ['grafana/tempo']) || workloadHasIdentity(record, ['tempo']))
           ),
@@ -5481,17 +5500,17 @@ export async function loadLocalComponentInventory(runtimeConfig) {
         'observability',
         'OpenTelemetry Collector evidence from collector workloads or opentelemetry.io CRDs.',
         [
-          ...matchDeploymentEvidence(deployments, (_meta, record) =>
+          ...matchDeploymentEvidence(deployments, (meta, record) =>
             !workloadHasHelperIdentity(record, ['opentelemetry-operator']) &&
             (workloadHasImageBasename(record, ['opentelemetry-collector', 'opentelemetry-collector-contrib', 'opentelemetry-collector-k8s']) ||
               workloadHasIdentity(record, ['opentelemetry-collector', 'otel-collector', 'otelcol']))
           ),
-          ...matchStatefulSetEvidence(statefulSets, (record) =>
-            !workloadHasHelperIdentity(record, ['opentelemetry-operator']) &&
-            (workloadHasImageBasename(record, ['opentelemetry-collector', 'opentelemetry-collector-contrib', 'opentelemetry-collector-k8s']) ||
-              workloadHasIdentity(record, ['opentelemetry-collector', 'otel-collector', 'otelcol']))
-          ),
-          ...matchDaemonSetEvidence(daemonSets, (_meta, record) =>
+          ...matchStatefulSetEvidence(statefulSets, (record) => {
+            return !workloadHasHelperIdentity(record, ['opentelemetry-operator']) &&
+              (workloadHasImageBasename(record, ['opentelemetry-collector', 'opentelemetry-collector-contrib', 'opentelemetry-collector-k8s']) ||
+                workloadHasIdentity(record, ['opentelemetry-collector', 'otel-collector', 'otelcol']));
+          }),
+          ...matchDaemonSetEvidence(daemonSets, (meta, record) =>
             !workloadHasHelperIdentity(record, ['opentelemetry-operator']) &&
             (workloadHasImageBasename(record, ['opentelemetry-collector', 'opentelemetry-collector-contrib', 'opentelemetry-collector-k8s']) ||
               workloadHasIdentity(record, ['opentelemetry-collector', 'otel-collector', 'otelcol']))
@@ -5505,15 +5524,15 @@ export async function loadLocalComponentInventory(runtimeConfig) {
         'observability',
         'Fluent Bit evidence from collector workloads or fluentbit.fluent.io CRDs.',
         [
-          ...matchDeploymentEvidence(deployments, (_meta, record) =>
+          ...matchDeploymentEvidence(deployments, (meta, record) =>
             !workloadHasHelperIdentity(record, ['fluent-operator', 'fluentbit-operator']) &&
             (workloadHasImageBasename(record, ['fluent-bit', 'aws-for-fluent-bit']) || workloadHasIdentity(record, ['fluent-bit', 'fluentbit']))
           ),
-          ...matchStatefulSetEvidence(statefulSets, (record) =>
-            !workloadHasHelperIdentity(record, ['fluent-operator', 'fluentbit-operator']) &&
-            (workloadHasImageBasename(record, ['fluent-bit', 'aws-for-fluent-bit']) || workloadHasIdentity(record, ['fluent-bit', 'fluentbit']))
-          ),
-          ...matchDaemonSetEvidence(daemonSets, (_meta, record) =>
+          ...matchStatefulSetEvidence(statefulSets, (record) => {
+            return !workloadHasHelperIdentity(record, ['fluent-operator', 'fluentbit-operator']) &&
+              (workloadHasImageBasename(record, ['fluent-bit', 'aws-for-fluent-bit']) || workloadHasIdentity(record, ['fluent-bit', 'fluentbit']));
+          }),
+          ...matchDaemonSetEvidence(daemonSets, (meta, record) =>
             !workloadHasHelperIdentity(record, ['fluent-operator', 'fluentbit-operator']) &&
             (workloadHasImageBasename(record, ['fluent-bit', 'aws-for-fluent-bit']) || workloadHasIdentity(record, ['fluent-bit', 'fluentbit']))
           ),
@@ -5526,15 +5545,15 @@ export async function loadLocalComponentInventory(runtimeConfig) {
         'observability',
         'Fluentd evidence from collector workloads or fluentd.fluent.io CRDs.',
         [
-          ...matchDeploymentEvidence(deployments, (_meta, record) =>
+          ...matchDeploymentEvidence(deployments, (meta, record) =>
             !workloadHasHelperIdentity(record, ['fluent-operator', 'fluentd-operator']) &&
             (workloadHasImageBasename(record, ['fluentd', 'fluentd-kubernetes-daemonset']) || workloadHasIdentity(record, ['fluentd']))
           ),
-          ...matchStatefulSetEvidence(statefulSets, (record) =>
-            !workloadHasHelperIdentity(record, ['fluent-operator', 'fluentd-operator']) &&
-            (workloadHasImageBasename(record, ['fluentd', 'fluentd-kubernetes-daemonset']) || workloadHasIdentity(record, ['fluentd']))
-          ),
-          ...matchDaemonSetEvidence(daemonSets, (_meta, record) =>
+          ...matchStatefulSetEvidence(statefulSets, (record) => {
+            return !workloadHasHelperIdentity(record, ['fluent-operator', 'fluentd-operator']) &&
+              (workloadHasImageBasename(record, ['fluentd', 'fluentd-kubernetes-daemonset']) || workloadHasIdentity(record, ['fluentd']));
+          }),
+          ...matchDaemonSetEvidence(daemonSets, (meta, record) =>
             !workloadHasHelperIdentity(record, ['fluent-operator', 'fluentd-operator']) &&
             (workloadHasImageBasename(record, ['fluentd', 'fluentd-kubernetes-daemonset']) || workloadHasIdentity(record, ['fluentd']))
           ),
@@ -5610,6 +5629,57 @@ export async function loadLocalComponentInventory(runtimeConfig) {
         ]
       ),
       componentSummary(
+        'hashicorp-vault',
+        'HashiCorp Vault',
+        'security',
+        'Vault server or Agent Injector evidence from dedicated workloads.',
+        [
+          ...matchDeploymentEvidence(deployments, (_meta, record) => workloadContains(record, ['hashicorp/vault', 'vault-k8s'])),
+          ...matchStatefulSetEvidence(statefulSets, (record) => workloadContains(record, ['hashicorp/vault'])),
+          ...matchDaemonSetEvidence(daemonSets, (_meta, record) => workloadContains(record, ['hashicorp/vault', 'vault-agent']))
+        ]
+      ),
+      componentSummary(
+        'vault-secrets-operator',
+        'Vault Secrets Operator',
+        'security',
+        'Official HashiCorp Vault Secrets Operator evidence.',
+        [
+          ...matchDeploymentEvidence(deployments, (_meta, record) => workloadContains(record, ['vault-secrets-operator'])),
+          ...matchCrdEvidence(crds, (record) => stringOrUndefined(asRecord(record.spec)?.group) === 'secrets.hashicorp.com')
+        ]
+      ),
+      componentSummary(
+        'external-secrets',
+        'External Secrets Operator',
+        'security',
+        'External Secrets Operator workloads or external-secrets.io CRDs.',
+        [
+          ...matchDeploymentEvidence(deployments, (_meta, record) => workloadContains(record, ['external-secrets'])),
+          ...matchCrdEvidence(crds, (record) => stringOrUndefined(asRecord(record.spec)?.group) === 'external-secrets.io')
+        ]
+      ),
+      componentSummary(
+        'sealed-secrets',
+        'Sealed Secrets',
+        'security',
+        'Sealed Secrets controller or bitnami.com SealedSecret CRD evidence.',
+        [
+          ...matchDeploymentEvidence(deployments, (_meta, record) => workloadContains(record, ['sealed-secrets-controller', 'sealed-secrets'])),
+          ...matchCrdEvidence(crds, (record) => stringOrUndefined(asRecord(record.spec)?.group) === 'bitnami.com')
+        ]
+      ),
+      componentSummary(
+        'bank-vaults',
+        'Bank-Vaults',
+        'security',
+        'Bank-Vaults operator or vault.banzaicloud.com CRD evidence.',
+        [
+          ...matchDeploymentEvidence(deployments, (_meta, record) => workloadContains(record, ['bank-vaults', 'vault-operator'])),
+          ...matchCrdEvidence(crds, (record) => stringOrUndefined(asRecord(record.spec)?.group) === 'vault.banzaicloud.com')
+        ]
+      ),
+      componentSummary(
         'external-dns',
         'external-dns',
         'dns',
@@ -5661,6 +5731,7 @@ export async function loadLocalComponentInventory(runtimeConfig) {
       certificates: items.filter((item) => item.category === 'certificates').length,
       dns: items.filter((item) => item.category === 'dns').length,
       observability: items.filter((item) => item.category === 'observability').length,
+      security: items.filter((item) => item.category === 'security').length,
       gateway: items.filter((item) => item.category === 'gateway').length,
       'continuous-delivery': items.filter((item) => item.category === 'continuous-delivery').length
     };

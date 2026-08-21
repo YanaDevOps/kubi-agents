@@ -799,18 +799,23 @@ function withStorageOverviewV2(overview, backendKind) {
 export async function loadLocalStorageDriverOverview(runtimeConfig, input = {}, dependencies = {}) {
   const driver = String(input.driver || '').trim();
   if (/^(rook-ceph|ceph)$/i.test(driver) || /(?:rbd|cephfs)\.csi\.ceph\.com/i.test(driver)) {
+    if (runtimeConfig.storageDrivers?.ceph?.enabled !== true) return withStorageOverviewV2(emptyDriverSummary('Ceph', new Date().toISOString(), 'Deep Ceph metrics are disabled. Set storage.drivers.ceph.enabled to true and restart the agent.'), 'none');
     return loadCephStorageOverview(runtimeConfig, input, dependencies);
   }
   if (/longhorn/i.test(driver)) {
+    if (runtimeConfig.storageDrivers?.longhorn?.enabled !== true) return withStorageOverviewV2(emptyDriverSummary('Longhorn', new Date().toISOString(), 'Deep Longhorn metrics are disabled. Set storage.drivers.longhorn.enabled to true and restart the agent.'), 'none');
     return loadLonghornStorageOverview(runtimeConfig, input, dependencies);
   }
   if (/openebs|mayastor|local\.csi\.openebs|zfs\.csi\.openebs/i.test(driver)) {
+    if (runtimeConfig.storageDrivers?.openebs?.enabled !== true) return withStorageOverviewV2(emptyDriverSummary('OpenEBS', new Date().toISOString(), 'Deep OpenEBS metrics are disabled. Set storage.drivers.openebs.enabled to true and restart the agent.'), 'none');
     return loadOpenEbsStorageOverview(runtimeConfig, input, dependencies);
   }
   if (/portworx|pxd\.openstorage\.org/i.test(driver)) {
+    if (runtimeConfig.storageDrivers?.portworx?.enabled !== true) return withStorageOverviewV2(emptyDriverSummary('Portworx', new Date().toISOString(), 'Deep Portworx metrics are disabled. Set storage.drivers.portworx.enabled to true and restart the agent.'), 'none');
     return loadPortworxStorageOverview(runtimeConfig, input, dependencies);
   }
   if (/vitastor/i.test(driver)) {
+    if (runtimeConfig.storageDrivers?.vitastor?.enabled !== true) return withStorageOverviewV2(emptyDriverSummary('Vitastor', new Date().toISOString(), 'Deep Vitastor metrics are disabled. Set storage.drivers.vitastor.enabled to true and restart the agent.'), 'none');
     return withStorageOverviewV2(await loadVitastorStorageDriverOverview(runtimeConfig, input, dependencies), 'vitastor');
   }
   const fetchedAt = new Date().toISOString();

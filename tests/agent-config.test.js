@@ -48,9 +48,12 @@ discovery:
         tls: { certFile: '', keyFile: '' }
       },
       storageDrivers: {
-        openebs: { profiles: [] },
-        portworx: { profiles: [] },
+        ceph: { enabled: false },
+        longhorn: { enabled: false },
+        openebs: { enabled: false, profiles: [] },
+        portworx: { enabled: false, profiles: [] },
         vitastor: {
+          enabled: false,
           cli: {
             enabled: true,
             path: 'vitastor-cli',

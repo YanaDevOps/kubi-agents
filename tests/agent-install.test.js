@@ -10,6 +10,8 @@ describe('agent installer safety', () => {
     expect(source.indexOf('if [ "$EXPECTED" != "$ACTUAL" ]')).toBeLessThan(source.indexOf('pair --control-plane-url'));
     expect(source).toContain('storage:');
     expect(source).toContain('drivers:');
+    expect(source.match(/^    (?:vitastor|ceph|longhorn|openebs|portworx):$/gm)).toHaveLength(5);
+    expect(source.match(/^      enabled: false$/gm)?.length).toBeGreaterThanOrEqual(5);
     expect(source).toContain('chmod 0600 /etc/kubi-agent/agent.yaml');
   });
 

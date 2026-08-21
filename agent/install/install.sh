@@ -95,12 +95,12 @@ metrics_exporter:
   #   cert_file: /etc/kubi-agent/tls/metrics.crt
   #   key_file: /etc/kubi-agent/tls/metrics.key
 
-# Optional deep storage metrics. Kubernetes storage inventory works without this.
-# The agent automatically uses read-only vitastor-cli JSON commands on a single-context host.
-# Add an exact context profile on multi-context gateways or when direct etcd is required.
+# Optional deep storage metrics. Kubernetes CSI inventory works without these collectors.
+# Explicitly enable only the provider used by this host, then restart kubi-agent.
 storage:
   drivers:
     vitastor:
+      enabled: false
       cli:
         enabled: true
         path: vitastor-cli
@@ -122,10 +122,14 @@ storage:
       #     # metrics:
       #     #   scheme: http
       #     #   timeout_seconds: 5
-    # OpenEBS and Portworx exporters are auto-discovered on internal Services.
-    # Add a context profile only for authenticated or otherwise undiscoverable endpoints.
+    ceph:
+      enabled: false
+    longhorn:
+      enabled: false
     openebs:
+      enabled: false
       profiles: []
+      # Add a context profile only for authenticated or otherwise undiscoverable endpoints.
       # profiles:
       #   - context: production
       #     metrics_endpoints:
@@ -133,6 +137,7 @@ storage:
       #         ca_file: /etc/kubi-agent/tls/openebs-ca.pem
       #         bearer_token_file: /etc/kubi-agent/tokens/openebs
     portworx:
+      enabled: false
       profiles: []
       # profiles:
       #   - context: "*"

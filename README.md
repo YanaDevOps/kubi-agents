@@ -28,6 +28,7 @@ Agent `v0.1.24` restores per-monitor Vitastor inventory by enriching healthy CLI
 Agent `v0.1.25` adds an opt-in balanced Prometheus detail level with per-node, per-namespace, and per-workload metrics. The default aggregate mode is unchanged. The release also includes a Grafana dashboard, Prometheus alert rules, and local or authenticated remote scrape examples.
 Agent `v0.1.26` adds provider-neutral CSI health from CSINode, VolumeAttachment, CSIStorageCapacity, and positively matched CSI plugin Pods. It groups Ceph RBD/CephFS into one Rook/Ceph backend and adds read-only Rook/Ceph and Longhorn CRD/exporter adapters.
 Agent `v0.1.27` adds read-only OpenEBS and Portworx adapters. OpenEBS Mayastor, LVM LocalPV, and ZFS LocalPV are grouped into one provider; Portworx adds nodes, pools, volumes, I/O, and host connection health. Context-scoped bearer and mTLS exporter endpoints remain local to the agent host.
+Agent `v0.1.28` adds PV/PVC event reads, Vault security ecosystem detection, Argo CD multi-source applications, and more precise PVC usage diagnostics. Gateway API is reported as an ingress capability rather than a service mesh. Every deep storage adapter is now explicit opt-in; generic CSI inventory remains enabled.
 
 ## Install
 

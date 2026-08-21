@@ -151,8 +151,13 @@ describe('storage provider adapters', () => {
 
   test('routes OpenEBS and Portworx CSI aliases to deep adapters', async () => {
     const endpoint = await apiServer({});
-    const openebs = await loadLocalStorageDriverOverview(runtimeConfig(endpoint), { driver: 'io.openebs.csi-mayastor' }, { getMetrics: async () => '' });
-    const portworx = await loadLocalStorageDriverOverview(runtimeConfig(endpoint), { driver: 'pxd.openstorage.org' }, { getMetrics: async () => '' });
+    const config = runtimeConfig(endpoint);
+    config.storageDrivers = {
+      openebs: { enabled: true, profiles: [] },
+      portworx: { enabled: true, profiles: [] }
+    };
+    const openebs = await loadLocalStorageDriverOverview(config, { driver: 'io.openebs.csi-mayastor' }, { getMetrics: async () => '' });
+    const portworx = await loadLocalStorageDriverOverview(config, { driver: 'pxd.openstorage.org' }, { getMetrics: async () => '' });
     expect(openebs.driver.backendKind).toBe('openebs');
     expect(portworx.driver.backendKind).toBe('portworx');
   });

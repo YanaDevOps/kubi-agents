@@ -78,6 +78,9 @@ export function createAgentRelayClient(options) {
       return options.dispatch(requestStream(command.request || {}));
     }
     if (command.kind === 'probe') {
+      if (options.probe) {
+        return options.probe(command.selector);
+      }
       const runtimeConfig = resolveAgentRuntimeConfigForSelector(options.runtimeConfig, command.selector);
       const namespaces = await loadLocalNamespaces(runtimeConfig);
       if (namespaces.partial || namespaces.availability === 'unavailable') {

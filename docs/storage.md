@@ -17,6 +17,10 @@ permissions produce partial data instead of failing the whole Storage page.
 
 ## Backend adapters
 
+Deep adapters are disabled by default. Enable only the installed backend under
+`storage.drivers.<provider>.enabled: true` in `/etc/kubi-agent/agent.yaml`, validate the config, and restart
+the agent. Universal CSI health remains available while deep collection is disabled.
+
 - **Vitastor:** bounded read-only `vitastor-cli` JSON commands with etcd discovery as fallback.
 - **Rook / Ceph:** CephCluster, CephBlockPool, and CephFilesystem CRDs, optionally enriched from a recognized
   internal Ceph manager or exporter `/metrics` endpoint.

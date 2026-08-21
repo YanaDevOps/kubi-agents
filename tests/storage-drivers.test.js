@@ -21,7 +21,7 @@ describe('agent storage driver metrics', () => {
     const overview = await loadLocalStorageDriverOverview({
       kubeContext: 'default',
       discoveredContextCount: 1,
-      storageDrivers: { vitastor: { cli: { enabled: true, path: 'vitastor-cli' }, profiles: [] } }
+      storageDrivers: { vitastor: { enabled: true, cli: { enabled: true, path: 'vitastor-cli' }, profiles: [] } }
     }, { driver: 'csi.vitastor.io' }, {
       execFile: async (_command, args) => JSON.stringify(payloads[args[0]]),
       discoverVitastorConfig: async () => ({ endpoints: [], prefix: '/vitastor', poolIds: [], evidence: [] })
@@ -75,6 +75,7 @@ describe('agent storage driver metrics', () => {
         discoveredContextCount: 1,
         storageDrivers: {
           vitastor: {
+            enabled: true,
             cli: { enabled: true, path: 'vitastor-cli' },
             profiles: [{
               context: '*', endpoints: [endpoint], prefix: '/vitastor', scheme: 'http', timeoutSeconds: 1,
@@ -137,6 +138,7 @@ describe('agent storage driver metrics', () => {
         },
         storageDrivers: {
           vitastor: {
+            enabled: true,
             cli: { enabled: false },
             profiles: [{
               context: '*',

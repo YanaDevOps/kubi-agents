@@ -37,10 +37,12 @@ logging:
   #   max_size_mb: 10
   #   max_files: 5
 
-# Optional deep Vitastor metrics. CLI auto-detection is read-only and enabled by default.
+# Optional deep storage metrics. Generic Kubernetes CSI inventory works without these collectors.
+# Explicitly enable only providers used by this host, then restart kubi-agent.
 storage:
   drivers:
     vitastor:
+      enabled: false
       cli:
         enabled: true
         path: vitastor-cli
@@ -68,7 +70,12 @@ storage:
 #             timeout_seconds: 5
 #             auth:
 #               mode: none
+    ceph:
+      enabled: false
+    longhorn:
+      enabled: false
     openebs:
+      enabled: false
       profiles: []
       # - context: production
       #   metrics_endpoints:
@@ -78,6 +85,7 @@ storage:
       #       client_key_file: /etc/kubi-agent/tls/openebs-client.key
       #       bearer_token_file: /etc/kubi-agent/tokens/openebs
     portworx:
+      enabled: false
       profiles: []
       # - context: "*"
       #   metrics_endpoints:
@@ -102,6 +110,8 @@ By default systemd captures stdout/stderr in journald. Optional file output uses
 
 KUBI always derives generic CSI driver, StorageClass, PV, and PVC inventory from the Kubernetes API. Deep provider metrics are optional and run only inside the customer-side agent.
 
+Set `storage.drivers.<provider>.enabled: true` for exactly the backends whose deep metrics should run. Supported provider keys are `vitastor`, `ceph`, `longhorn`, `openebs`, and `portworx`. All are disabled by default; changing a nested CLI or endpoint option alone does not enable collection.
+
 For Vitastor, a single-context node or gateway first runs only `vitastor-cli status --json`, `vitastor-cli pools --json`, and `vitastor-cli osds --json`. Commands run without a shell and have bounded runtime and output. They follow the host's current Vitastor configuration, so endpoint address changes do not require a KUBI configuration change.
 
 Agent `v0.1.24+` also performs a best-effort etcd read for monitor membership after successful CLI collection. This supplies monitor names, roles, health, and addresses. Failure to enrich monitor details does not downgrade the CLI-backed driver response.
@@ -116,7 +126,7 @@ Use a read-only etcd account where authentication is enabled. TLS settings are f
 
 `StorageClass.parameters.poolId` may provide a configured pool count when deep metrics are unavailable, but StorageClass data is never presented as capacity. Supported Vitastor metric authentication modes are `none`, `basic`, `bearer`, and `headers`.
 
-OpenEBS and Portworx use recognized internal exporter Services automatically. Configure `metrics_endpoints`
+When explicitly enabled, OpenEBS and Portworx use recognized internal exporter Services automatically. Configure `metrics_endpoints`
 only when discovery is unavailable or the endpoint requires bearer or mTLS authentication. Exact context
 profiles take precedence over `*`; each profile accepts up to eight HTTP(S) endpoints. URLs cannot contain
 inline credentials, query strings, or fragments. Client certificate and key files must be configured

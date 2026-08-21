@@ -20,6 +20,10 @@ describe('agent component detection', () => {
         }],
         '/apis/apps/v1/deployments': [
           {
+            metadata: { name: 'vault-secrets-operator', namespace: 'vault-secrets-operator-system' },
+            spec: { template: { spec: { containers: [{ name: 'manager', image: 'hashicorp/vault-secrets-operator:0.10.0' }] } } }
+          },
+          {
             metadata: { name: 'vector', namespace: 'observability' },
             spec: { template: { spec: { containers: [{ name: 'vector', image: 'timberio/vector:0.48.0' }] } } }
           },
@@ -43,6 +47,10 @@ describe('agent component detection', () => {
           }
         ],
         '/apis/apps/v1/statefulsets': [
+          {
+            metadata: { name: 'vault', namespace: 'vault' },
+            spec: { template: { spec: { containers: [{ name: 'vault', image: 'hashicorp/vault:1.20.0' }] } } }
+          },
           {
             metadata: { name: 'dashboards', namespace: 'monitoring' },
             spec: { template: { spec: { containers: [{ name: 'ui', image: 'grafana/grafana:11.0.0' }] } } }
@@ -68,7 +76,8 @@ describe('agent component detection', () => {
         '/apis/storage.k8s.io/v1/csidrivers': [{ metadata: { name: 'csi.vitastor.io' } }],
         '/apis/networking.k8s.io/v1/ingressclasses': [],
         '/apis/apiextensions.k8s.io/v1/customresourcedefinitions': [
-          { metadata: { name: 'vmsingles.operator.victoriametrics.com' }, spec: { group: 'operator.victoriametrics.com' } }
+          { metadata: { name: 'vmsingles.operator.victoriametrics.com' }, spec: { group: 'operator.victoriametrics.com' } },
+          { metadata: { name: 'vaultauths.secrets.hashicorp.com' }, spec: { group: 'secrets.hashicorp.com' } }
         ]
       };
       response.writeHead(resources[pathname] ? 200 : 404, { 'content-type': 'application/json' });
@@ -97,7 +106,10 @@ describe('agent component detection', () => {
       expect(response.items.find((item) => item.key === 'fluentd')).toMatchObject({ category: 'observability', status: 'detected' });
       expect(response.items.find((item) => item.key === 'k3s-servicelb')).toMatchObject({ category: 'networking', status: 'detected' });
       expect(response.items.find((item) => item.key === 'flannel')).toMatchObject({ category: 'networking', status: 'detected' });
+      expect(response.items.find((item) => item.key === 'hashicorp-vault')).toMatchObject({ category: 'security', status: 'detected' });
+      expect(response.items.find((item) => item.key === 'vault-secrets-operator')).toMatchObject({ category: 'security', status: 'detected' });
       expect(response.summary.storage).toBe(1);
+      expect(response.summary.security).toBe(2);
     } finally {
       agent.destroy();
       await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));

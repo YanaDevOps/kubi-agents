@@ -211,6 +211,7 @@ function normalizeVitastorProfiles(settings) {
   }
   return {
     vitastor: {
+      enabled: optionalBoolean(vitastor.enabled, 'storage.drivers.vitastor.enabled', false),
       cli: {
         enabled: optionalBoolean(cli.enabled, 'storage.drivers.vitastor.cli.enabled', true),
         path: optionalString(cli.path, 'storage.drivers.vitastor.cli.path', 'vitastor-cli') || 'vitastor-cli',
@@ -290,7 +291,10 @@ function normalizeStorageMetricsProfiles(drivers, driverName) {
     }
     contexts.add(profile.context);
   }
-  return { profiles };
+  return {
+    enabled: optionalBoolean(driver.enabled, `storage.drivers.${driverName}.enabled`, false),
+    profiles
+  };
 }
 
 function normalizeStorageDrivers(settings) {
@@ -298,6 +302,8 @@ function normalizeStorageDrivers(settings) {
   const drivers = object(storage.drivers, 'storage.drivers');
   return {
     ...normalizeVitastorProfiles(settings),
+    ceph: { enabled: optionalBoolean(object(drivers.ceph, 'storage.drivers.ceph').enabled, 'storage.drivers.ceph.enabled', false) },
+    longhorn: { enabled: optionalBoolean(object(drivers.longhorn, 'storage.drivers.longhorn').enabled, 'storage.drivers.longhorn.enabled', false) },
     openebs: normalizeStorageMetricsProfiles(drivers, 'openebs'),
     portworx: normalizeStorageMetricsProfiles(drivers, 'portworx')
   };
