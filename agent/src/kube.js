@@ -4700,23 +4700,27 @@ function buildRuntimeDeliveryActivity(resourceSections, podsRaw, crdsRaw, fetche
   };
 }
 
-export async function loadLocalDeliveryActivity(runtimeConfig, namespaceScope = null) {
+export async function loadLocalDeliveryActivity(runtimeConfig, namespaceScope = null, provider = null) {
   try {
     const kubeConfig = loadLocalKubeConfig(runtimeConfig);
     const effectiveNamespace = namespaceScope || runtimeConfig.namespace || null;
+    const selectedProvider = provider === 'argocd' || provider === 'flux' ? provider : null;
+    const selectedDefinitions = selectedProvider
+      ? DELIVERY_RESOURCE_DEFINITIONS.filter((definition) => definition.providerId === selectedProvider)
+      : DELIVERY_RESOURCE_DEFINITIONS;
     const requests = await Promise.allSettled([
-      ...DELIVERY_RESOURCE_DEFINITIONS.map((definition) => fetchOptionalDeliveryResource(kubeConfig, definition, effectiveNamespace)),
+      ...selectedDefinitions.map((definition) => fetchOptionalDeliveryResource(kubeConfig, definition, effectiveNamespace)),
       fetchKubeList(kubeConfig, namespacePath('/api/v1/pods', '/api/v1/namespaces/:namespace/pods', effectiveNamespace)),
       fetchKubeList(kubeConfig, '/apis/apiextensions.k8s.io/v1/customresourcedefinitions')
     ]);
-    const resourceCount = DELIVERY_RESOURCE_DEFINITIONS.length;
+    const resourceCount = selectedDefinitions.length;
     const resourceSections = requests
       .slice(0, resourceCount)
       .map((request, index) =>
         request.status === 'fulfilled'
           ? request.value
           : {
-              definition: DELIVERY_RESOURCE_DEFINITIONS[index],
+              definition: selectedDefinitions[index],
               items: [],
               partial: true
             }
@@ -4741,7 +4745,16 @@ export async function loadLocalDeliveryActivity(runtimeConfig, namespaceScope = 
       partial = true;
       issues.push(truncationIssue('delivery-activity', 'The CRD list was truncated for delivery provider detection.'));
     }
-    return buildRuntimeDeliveryActivity(resourceSections, pods.items, crds.items, new Date().toISOString(), effectiveNamespace, issues, partial);
+    const summary = buildRuntimeDeliveryActivity(resourceSections, pods.items, crds.items, new Date().toISOString(), effectiveNamespace, issues, partial);
+    if (!selectedProvider) return summary;
+    return {
+      ...summary,
+      detectedProviders: summary.detectedProviders.filter((item) => item.providerId === selectedProvider),
+      controllers: {
+        ...summary.controllers,
+        items: summary.controllers.items.filter((item) => item.providerId === selectedProvider)
+      }
+    };
   } catch (error) {
     throw new Error(sanitizeKubeError(error));
   }
@@ -5690,8 +5703,8 @@ export async function loadLocalComponentInventory(runtimeConfig) {
         'gateway-api',
         'Gateway API',
         'gateway',
-        'Gateway API evidence from gateway.networking.k8s.io CRDs.',
-        [...matchCrdEvidence(crds, (record) => stringOrUndefined(asRecord(record.spec)?.group) === 'gateway.networking.k8s.io')]
+        'Served Gateway API CRDs are installed in this cluster.',
+        [...matchCrdEvidence(crds, (record) => gatewayApiDefinitionsFromCrds([record]).length > 0)]
       ),
       componentSummary(
         'argocd',

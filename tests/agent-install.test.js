@@ -13,6 +13,9 @@ describe('agent installer safety', () => {
     expect(source.match(/^    (?:vitastor|ceph|longhorn|openebs|portworx):$/gm)).toHaveLength(5);
     expect(source.match(/^      enabled: false$/gm)?.length).toBeGreaterThanOrEqual(5);
     expect(source).toContain('chmod 0600 /etc/kubi-agent/agent.yaml');
+    expect(source).toContain('--upgrade');
+    expect(source).toContain('Update requires an existing agent identity');
+    expect(source).toContain('KUBI_AGENT_IDENTITY=');
   });
 
   test('Windows installer verifies checksum before pairing', () => {
@@ -20,6 +23,9 @@ describe('agent installer safety', () => {
     expect(source).toContain('Get-FileHash');
     expect(source).toContain('Checksum verification failed');
     expect(source).toContain('New-Service');
-    expect(source.indexOf('if ($expected.ToLowerInvariant() -ne $actual)')).toBeLessThan(source.indexOf('pair --control-plane-url'));
+    expect(source.indexOf('if ($expected.ToLowerInvariant() -ne $actual)')).toBeLessThan(source.indexOf('pair --identity-file'));
+    expect(source).toContain('[switch]$Upgrade');
+    expect(source).toContain('Update requires an existing agent identity');
+    expect(source).toContain('--identity-file');
   });
 });

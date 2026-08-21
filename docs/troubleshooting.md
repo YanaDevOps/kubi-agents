@@ -60,13 +60,17 @@ The agent keeps heartbeat and runtime relay connectivity separate. Agent `v0.1.5
 
 Agent `v0.1.6` and newer use the installed binary release for both heartbeat and runtime health. Upgrading the binary does not require deleting the saved identity or pairing the agent again.
 
+For `v0.1.29+`, use the **Update agent** command shown on the active agent row. It runs the installer in tokenless update mode. A one-time pairing token is only for first installation or the explicit **Replace agent** recovery flow.
+
 ## Control-plane timeouts
 
 The agent uses bounded requests for registration, heartbeats, discovery sync, and token introspection. A `Control-plane request timed out after 15000ms` message means the host did not receive an HTTP response from `app.kubi.live` in time. Verify outbound TCP/443, DNS, proxy policy, and the SaaS health endpoint; the running agent will retry its normal heartbeat and relay lifecycle without spawning overlapping work.
 
 ## Update Required
 
-The installed binary is below the minimum hosted version or reports development build metadata. Download the current binary from the latest GitHub Release, replace it, verify `kubi-agent version`, and restart the service.
+The installed binary is below the minimum hosted version or reports development build metadata. Run the **Update agent** command from KUBI on the same host, then verify `kubi-agent version` and `systemctl status kubi-agent`. Do not revoke the agent or create a new pairing token for an ordinary update.
+
+If the agent was already revoked, its old identity cannot reconnect. Use **Replace agent** on that revoked row. The replacement pairing registers a new identity and KUBI moves the old agent's existing connections to it after registration.
 
 ## Prometheus Endpoint Is Unavailable
 

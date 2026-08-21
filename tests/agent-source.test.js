@@ -15,5 +15,14 @@ describe('agent source boundaries', () => {
     expect(cli).toContain('pair --control-plane-url <url> --pairing-token <token>');
     expect(cli).toContain('run');
     expect(cli).toContain('rotate');
+    expect(cli).toContain("globalArgs['identity-file']");
+  });
+
+  test('delivery activity forwards and scopes the selected provider', () => {
+    const server = readFileSync('agent/src/server.js', 'utf8');
+    const kube = readFileSync('agent/src/kube.js', 'utf8');
+    expect(server).toContain("url.searchParams.get('provider')");
+    expect(kube).toContain("provider === 'argocd' || provider === 'flux'");
+    expect(kube).toContain('gatewayApiDefinitionsFromCrds([record]).length > 0');
   });
 });

@@ -5,6 +5,7 @@ TARGET="linux-amd64"
 DOWNLOAD_BASE_URL=""
 CONTROL_PLANE_URL=""
 PAIRING_TOKEN=""
+UPGRADE="false"
 INSTALL_DIR="/usr/local/bin"
 SERVICE_NAME="kubi-agent"
 
@@ -14,13 +15,22 @@ while [ "$#" -gt 0 ]; do
     --download-base-url) DOWNLOAD_BASE_URL="${2:-}"; shift 2 ;;
     --control-plane-url) CONTROL_PLANE_URL="${2:-}"; shift 2 ;;
     --pairing-token) PAIRING_TOKEN="${2:-}"; shift 2 ;;
+    --upgrade) UPGRADE="true"; shift ;;
     --install-dir) INSTALL_DIR="${2:-}"; shift 2 ;;
     *) echo "Unknown argument: $1" >&2; exit 2 ;;
   esac
 done
 
-if [ -z "$DOWNLOAD_BASE_URL" ] || [ -z "$CONTROL_PLANE_URL" ] || [ -z "$PAIRING_TOKEN" ]; then
-  echo "Usage: install.sh --target <target> --download-base-url <url> --control-plane-url <url> --pairing-token <token>" >&2
+if [ -z "$DOWNLOAD_BASE_URL" ]; then
+  echo "Usage: install.sh --target <target> --download-base-url <url> [--upgrade | --control-plane-url <url> --pairing-token <token>]" >&2
+  exit 2
+fi
+if [ "$UPGRADE" = "true" ] && { [ -n "$CONTROL_PLANE_URL" ] || [ -n "$PAIRING_TOKEN" ]; }; then
+  echo "--upgrade preserves the existing agent identity and must not be combined with a pairing token." >&2
+  exit 2
+fi
+if [ "$UPGRADE" != "true" ] && { [ -z "$CONTROL_PLANE_URL" ] || [ -z "$PAIRING_TOKEN" ]; }; then
+  echo "A control-plane URL and one-time pairing token are required for the first installation." >&2
   exit 2
 fi
 
@@ -60,12 +70,31 @@ fi
 
 chmod +x "$TMP_DIR/kubi-agent"
 
+IDENTITY_PATH="${KUBI_AGENT_IDENTITY:-$HOME/.config/kubi-agent/config.json}"
+if [ "$UPGRADE" = "true" ] && [ ! -f "$IDENTITY_PATH" ]; then
+  echo "Update requires an existing agent identity at $IDENTITY_PATH. Use a replacement pairing from KUBI instead." >&2
+  exit 1
+fi
+
 if [ "$(id -u)" -eq 0 ]; then
   mkdir -p "$INSTALL_DIR"
-  cp "$TMP_DIR/kubi-agent" "$INSTALL_DIR/kubi-agent"
+  if [ "$UPGRADE" = "true" ] && [ ! -x "$INSTALL_DIR/kubi-agent" ]; then
+    echo "Existing agent binary was not found at $INSTALL_DIR/kubi-agent." >&2
+    exit 1
+  fi
+  if [ "$UPGRADE" = "true" ]; then
+    cp "$INSTALL_DIR/kubi-agent" "$TMP_DIR/kubi-agent.previous"
+    if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files "$SERVICE_NAME.service" >/dev/null 2>&1; then
+      systemctl stop "$SERVICE_NAME" || true
+    elif [ "$(uname -s)" = "Darwin" ] && [ -f /Library/LaunchDaemons/live.kubi.agent.plist ]; then
+      launchctl unload /Library/LaunchDaemons/live.kubi.agent.plist >/dev/null 2>&1 || true
+    fi
+  fi
+  install -m 0755 "$TMP_DIR/kubi-agent" "$INSTALL_DIR/kubi-agent.next"
+  mv -f "$INSTALL_DIR/kubi-agent.next" "$INSTALL_DIR/kubi-agent"
   mkdir -p /etc/kubi-agent /var/log/kubi-agent
   chmod 0750 /etc/kubi-agent /var/log/kubi-agent
-  if [ ! -f /etc/kubi-agent/agent.yaml ]; then
+  if [ "$UPGRADE" != "true" ] && [ ! -f /etc/kubi-agent/agent.yaml ]; then
     cat >/etc/kubi-agent/agent.yaml <<EOF
 # KUBI Agent settings. Restart kubi-agent after editing this file.
 relay:
@@ -155,7 +184,9 @@ logging:
 EOF
     chmod 0600 /etc/kubi-agent/agent.yaml
   fi
-  "$INSTALL_DIR/kubi-agent" pair --control-plane-url "$CONTROL_PLANE_URL" --pairing-token "$PAIRING_TOKEN"
+  if [ "$UPGRADE" != "true" ]; then
+    KUBI_AGENT_IDENTITY="$IDENTITY_PATH" "$INSTALL_DIR/kubi-agent" pair --control-plane-url "$CONTROL_PLANE_URL" --pairing-token "$PAIRING_TOKEN"
+  fi
 
   if command -v systemctl >/dev/null 2>&1 && [ "$TARGET" = "linux-amd64" -o "$TARGET" = "linux-arm64" ]; then
     cat >"/etc/systemd/system/$SERVICE_NAME.service" <<EOF
@@ -171,13 +202,21 @@ Restart=always
 RestartSec=5
 Environment=NODE_ENV=production
 Environment=KUBI_AGENT_CONFIG=/etc/kubi-agent/agent.yaml
+Environment=KUBI_AGENT_IDENTITY=$IDENTITY_PATH
 
 [Install]
 WantedBy=multi-user.target
 EOF
     systemctl daemon-reload
-    systemctl enable --now "$SERVICE_NAME"
-    echo "Installed and started systemd service $SERVICE_NAME."
+    if ! systemctl enable --now "$SERVICE_NAME" || { sleep 1; ! systemctl is-active --quiet "$SERVICE_NAME"; }; then
+      if [ "$UPGRADE" = "true" ]; then
+        install -m 0755 "$TMP_DIR/kubi-agent.previous" "$INSTALL_DIR/kubi-agent"
+        systemctl restart "$SERVICE_NAME" || true
+      fi
+      echo "The updated agent did not start; the previous binary was restored." >&2
+      exit 1
+    fi
+    echo "$([ "$UPGRADE" = "true" ] && echo Updated || echo Installed) and started systemd service $SERVICE_NAME."
   elif [ "$(uname -s)" = "Darwin" ]; then
     PLIST="/Library/LaunchDaemons/live.kubi.agent.plist"
     cat >"$PLIST" <<EOF
@@ -193,13 +232,33 @@ EOF
 </plist>
 EOF
     launchctl unload "$PLIST" >/dev/null 2>&1 || true
-    launchctl load "$PLIST"
-    echo "Installed and loaded launchd service live.kubi.agent."
+    if ! launchctl load "$PLIST"; then
+      if [ "$UPGRADE" = "true" ]; then
+        install -m 0755 "$TMP_DIR/kubi-agent.previous" "$INSTALL_DIR/kubi-agent"
+        launchctl load "$PLIST" || true
+      fi
+      echo "The updated agent did not start; the previous binary was restored." >&2
+      exit 1
+    fi
+    echo "$([ "$UPGRADE" = "true" ] && echo Updated || echo Installed) and loaded launchd service live.kubi.agent."
   else
     echo "Installed binary at $INSTALL_DIR/kubi-agent. Start it with: kubi-agent run"
   fi
 else
-  cp "$TMP_DIR/kubi-agent" ./kubi-agent
-  ./kubi-agent pair --control-plane-url "$CONTROL_PLANE_URL" --pairing-token "$PAIRING_TOKEN"
-  echo "Installed local binary at ./kubi-agent. Re-run with sudo for system service installation."
+  if [ "$UPGRADE" = "true" ] && [ ! -x ./kubi-agent ]; then
+    echo "Existing agent binary was not found at ./kubi-agent." >&2
+    exit 1
+  fi
+  install -m 0755 "$TMP_DIR/kubi-agent" ./kubi-agent.next
+  mv -f ./kubi-agent.next ./kubi-agent
+  if [ "$UPGRADE" != "true" ]; then
+    KUBI_AGENT_IDENTITY="$IDENTITY_PATH" ./kubi-agent pair --control-plane-url "$CONTROL_PLANE_URL" --pairing-token "$PAIRING_TOKEN"
+  fi
+  echo "$([ "$UPGRADE" = "true" ] && echo Updated || echo Installed) local binary at ./kubi-agent."
+fi
+
+if [ "$(id -u)" -eq 0 ]; then
+  "${INSTALL_DIR}/kubi-agent" version
+else
+  ./kubi-agent version
 fi

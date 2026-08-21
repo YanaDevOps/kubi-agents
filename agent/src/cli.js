@@ -251,6 +251,10 @@ function configCommand(action) {
 }
 
 async function main() {
+  const globalArgs = parseArgs(process.argv.slice(3));
+  if (typeof globalArgs['identity-file'] === 'string') {
+    process.env.KUBI_AGENT_IDENTITY = globalArgs['identity-file'];
+  }
   const command = process.argv[2];
   if (command === 'pair') {
     await pairAgent(process.argv.slice(3));

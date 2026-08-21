@@ -739,7 +739,7 @@ export function createAgentLoopbackServer(options) {
       if (url.pathname === '/v1/delivery-activity') {
         return {
           status: 200,
-          payload: await deliveryActivityProvider(runtimeConfig, url.searchParams.get('ns')),
+          payload: await deliveryActivityProvider(runtimeConfig, url.searchParams.get('ns'), url.searchParams.get('provider')),
           headers: responseCorsHeaders
         };
       }

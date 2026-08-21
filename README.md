@@ -29,6 +29,7 @@ Agent `v0.1.25` adds an opt-in balanced Prometheus detail level with per-node, p
 Agent `v0.1.26` adds provider-neutral CSI health from CSINode, VolumeAttachment, CSIStorageCapacity, and positively matched CSI plugin Pods. It groups Ceph RBD/CephFS into one Rook/Ceph backend and adds read-only Rook/Ceph and Longhorn CRD/exporter adapters.
 Agent `v0.1.27` adds read-only OpenEBS and Portworx adapters. OpenEBS Mayastor, LVM LocalPV, and ZFS LocalPV are grouped into one provider; Portworx adds nodes, pools, volumes, I/O, and host connection health. Context-scoped bearer and mTLS exporter endpoints remain local to the agent host.
 Agent `v0.1.28` adds PV/PVC event reads, Vault security ecosystem detection, Argo CD multi-source applications, and more precise PVC usage diagnostics. Gateway API is reported as an ingress capability rather than a service mesh. Every deep storage adapter is now explicit opt-in; generic CSI inventory remains enabled.
+Agent `v0.1.29` adds verified tokenless in-place upgrades that preserve the existing agent identity, configuration, and KUBI connections. Delivery Activity reads only the selected Argo CD or Flux APIs, and Gateway API detection requires a supported served CRD.
 
 ## Install
 
@@ -39,6 +40,12 @@ Agent `v0.1.28` adds PV/PVC event reads, Vault security ecosystem detection, Arg
 5. Add custom kubeconfig paths to `/etc/kubi-agent/agent.yaml`, restart the service, and select a discovered context in **Connections → Kubeconfigs**.
 
 The pairing token expires after 30 minutes and can be used once. If it expires, create a new token; an expired token does not affect an already paired agent.
+
+## Update
+
+When KUBI shows `update-recommended` or `update-required`, copy the **Update agent** command from the existing agent row and run it on the same host. The command uses `--upgrade`, contains no pairing token, preserves the identity and `/etc/kubi-agent/agent.yaml`, and restores the previous binary if the managed service cannot start.
+
+Do not revoke an agent to update it. Revoke is a decommissioning action. If an identity was already revoked, use **Replace agent** on that row; after the replacement registers, KUBI transfers its existing connections to the new identity.
 
 ## Supported Artifacts
 
