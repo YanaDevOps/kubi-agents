@@ -30,6 +30,7 @@ Agent `v0.1.26` adds provider-neutral CSI health from CSINode, VolumeAttachment,
 Agent `v0.1.27` adds read-only OpenEBS and Portworx adapters. OpenEBS Mayastor, LVM LocalPV, and ZFS LocalPV are grouped into one provider; Portworx adds nodes, pools, volumes, I/O, and host connection health. Context-scoped bearer and mTLS exporter endpoints remain local to the agent host.
 Agent `v0.1.28` adds PV/PVC event reads, Vault security ecosystem detection, Argo CD multi-source applications, and more precise PVC usage diagnostics. Gateway API is reported as an ingress capability rather than a service mesh. Every deep storage adapter is now explicit opt-in; generic CSI inventory remains enabled.
 Agent `v0.1.30` fixes agent-backed Argo CD Delivery Activity, bounds provider-specific Kubernetes reads, and reports failed relay endpoints in the agent logs. Tokenless in-place upgrades and strict Gateway API evidence remain available from `v0.1.29`.
+Agent `v0.1.31` adds bounded Kubernetes-native Delivery Activity reads for Argo CD, Flux, Tekton, Argo Workflows, Argo Rollouts, and Flagger. Jenkins, GitLab Runner, Drone, Forgejo Actions, and GitHub Actions are detected from cluster workloads but remain detection-only until optional agent-side API integrations are available. Source credentials and Kubernetes Secret values are not returned.
 
 ## Install
 
@@ -78,6 +79,7 @@ kubi-agent rotate
 - [Troubleshooting](docs/troubleshooting.md)
 - [Prometheus metrics](docs/prometheus-metrics.md)
 - [Storage and CSI diagnostics](docs/storage.md)
+- [Delivery Activity providers](docs/delivery-activity.md)
 - [Bundled observability assets](observability/README.md)
 
 Release tags use `agent-vX.Y.Z`.

@@ -28,6 +28,13 @@ import {
   gatewayApiDefinitionsFromCrds
 } from '../../src/shared/gateway-api-validation.js';
 import {
+  DELIVERY_PROVIDER_IDS,
+  DELIVERY_PROVIDER_MARKERS,
+  DELIVERY_RESOURCE_DEFINITIONS,
+  buildDeliveryActivitySummary as buildSharedDeliveryActivitySummary,
+  deliveryKindAllowed as sharedDeliveryKindAllowed
+} from '../../src/shared/delivery-activity.js';
+import {
   buildPortsTruthSummary,
   buildTrafficIntentSummary,
   buildCniPluginsSummary,
@@ -43,53 +50,6 @@ const MAX_PAGES = 10;
 export const VALIDATED_KUBECONFIG_CACHE_TTL_MS = 2_000;
 const PRIVATE_HOST_PATTERNS = ['.local', '.internal', '.cluster.local'];
 const validatedKubeConfigCache = new Map();
-const DELIVERY_RESOURCE_DEFINITIONS = [
-  { providerId: 'argocd', providerName: 'Argo CD', group: 'argoproj.io', versions: ['v1alpha1'], resource: 'applications', kind: 'Application' },
-  {
-    providerId: 'flux',
-    providerName: 'Flux',
-    group: 'kustomize.toolkit.fluxcd.io',
-    versions: ['v1', 'v1beta2'],
-    resource: 'kustomizations',
-    kind: 'Kustomization'
-  },
-  {
-    providerId: 'flux',
-    providerName: 'Flux',
-    group: 'helm.toolkit.fluxcd.io',
-    versions: ['v2', 'v2beta2'],
-    resource: 'helmreleases',
-    kind: 'HelmRelease'
-  },
-  {
-    providerId: 'flux',
-    providerName: 'Flux',
-    group: 'source.toolkit.fluxcd.io',
-    versions: ['v1', 'v1beta2'],
-    resource: 'gitrepositories',
-    kind: 'GitRepository',
-    source: true
-  },
-  {
-    providerId: 'flux',
-    providerName: 'Flux',
-    group: 'source.toolkit.fluxcd.io',
-    versions: ['v1', 'v1beta2'],
-    resource: 'helmrepositories',
-    kind: 'HelmRepository',
-    source: true
-  },
-  {
-    providerId: 'flux',
-    providerName: 'Flux',
-    group: 'source.toolkit.fluxcd.io',
-    versions: ['v1', 'v1beta2'],
-    resource: 'ocirepositories',
-    kind: 'OCIRepository',
-    source: true
-  }
-];
-
 function sanitizeKubeError(error) {
   if (error instanceof Error && error.message) {
     return error.message;
@@ -2679,9 +2639,8 @@ function buildRuntimeServiceMeshInventory(namespaces, pods, deployments, service
     .map(normalizeNamespace)
     .sort((left, right) => left.name.localeCompare(right.name));
   const issuesList = [];
-  if (providers.length === 0) {
-    issuesList.push({ severity: 'info', issueType: 'no-provider-detected', message: 'No service mesh provider evidence was found in CRDs, workloads, or pods.', objectRefs: [] });
-  } else if (sidecarPods.length === 0) {
+  const sidecarProviders = providers.filter((provider) => ['istio', 'linkerd', 'consul', 'kuma'].includes(provider.key));
+  if (sidecarProviders.length > 0 && sidecarPods.length === 0) {
     issuesList.push({ severity: 'warning', issueType: 'provider-without-sidecars', message: 'Service mesh control-plane evidence exists, but no workload sidecars were detected in the current scope.', objectRefs: [] });
   }
   const gatewayApiCrds = asRecordArray(crds).filter((crd) => metadataFor(crd).name.includes('gateway.networking.k8s.io')).length;
@@ -4427,6 +4386,7 @@ export async function loadLocalBackupActivity(runtimeConfig, namespaceScope = nu
 
 function deliveryResourcePath(definition, version, namespaceScope) {
   const base = `/apis/${definition.group}/${version}`;
+  if (definition.namespaced === false) return `${base}/${definition.resource}`;
   return namespacePath(`${base}/${definition.resource}`, `${base}/namespaces/:namespace/${definition.resource}`, namespaceScope);
 }
 
@@ -4463,19 +4423,29 @@ async function fetchOptionalDeliveryResource(kubeConfig, definition, namespaceSc
 }
 
 function deliveryControllerPodPath(provider) {
-  const namespace = provider === 'argocd' ? 'argocd' : 'flux-system';
+  const namespace = {
+    argocd: 'argocd',
+    flux: 'flux-system',
+    tekton: 'tekton-pipelines',
+    'argo-workflows': 'argo',
+    'argo-rollouts': 'argo-rollouts',
+    flagger: 'flagger-system'
+  }[provider];
+  if (!namespace) return '/api/v1/pods';
   return `/api/v1/namespaces/${namespace}/pods`;
 }
 
 function deliveryProviderCrdName(provider) {
-  return provider === 'argocd' ? 'applications.argoproj.io' : 'kustomizations.kustomize.toolkit.fluxcd.io';
+  return DELIVERY_PROVIDER_MARKERS[provider];
 }
 
 async function fetchOptionalDeliveryProviderCrd(kubeConfig, provider) {
+  const crdName = deliveryProviderCrdName(provider);
+  if (!crdName) return null;
   try {
     return await fetchKubeJson(
       kubeConfig,
-      `/apis/apiextensions.k8s.io/v1/customresourcedefinitions/${deliveryProviderCrdName(provider)}`,
+      `/apis/apiextensions.k8s.io/v1/customresourcedefinitions/${crdName}`,
       DELIVERY_REQUEST_OPTIONS
     );
   } catch {
@@ -4741,28 +4711,21 @@ function buildRuntimeDeliveryActivity(resourceSections, podsRaw, crdsRaw, fetche
 /**
  * @param {any} runtimeConfig
  * @param {string | null} [namespaceScope]
- * @param {'argocd' | 'flux' | null} [provider]
+ * @param {'argocd' | 'flux' | 'tekton' | 'argo-workflows' | 'argo-rollouts' | 'flagger' | null} [provider]
  */
 export async function loadLocalDeliveryActivity(runtimeConfig, namespaceScope = null, provider = null) {
   try {
     const kubeConfig = loadLocalKubeConfig(runtimeConfig);
     const effectiveNamespace = namespaceScope || runtimeConfig.namespace || null;
-    const selectedProvider = provider === 'argocd' || provider === 'flux' ? provider : null;
+    const selectedProvider = DELIVERY_PROVIDER_IDS.includes(provider) ? provider : null;
     const selectedDefinitions = selectedProvider
       ? DELIVERY_RESOURCE_DEFINITIONS.filter((definition) => definition.providerId === selectedProvider)
       : DELIVERY_RESOURCE_DEFINITIONS;
-    const supportRequests = selectedProvider
-      ? [
-          fetchKubeList(kubeConfig, deliveryControllerPodPath(selectedProvider), true, DELIVERY_REQUEST_OPTIONS),
-          fetchOptionalDeliveryProviderCrd(kubeConfig, selectedProvider)
-        ]
-      : [
-          fetchKubeList(kubeConfig, namespacePath('/api/v1/pods', '/api/v1/namespaces/:namespace/pods', effectiveNamespace)),
-          fetchKubeList(kubeConfig, '/apis/apiextensions.k8s.io/v1/customresourcedefinitions')
-        ];
+    const providerIds = selectedProvider ? [selectedProvider] : DELIVERY_PROVIDER_IDS;
     const requests = await Promise.allSettled([
-      ...selectedDefinitions.map((definition) => fetchOptionalDeliveryResource(kubeConfig, definition, effectiveNamespace)),
-      ...supportRequests
+      ...selectedDefinitions.map((definition) => fetchOptionalDeliveryResource(kubeConfig, definition, null)),
+      fetchKubeList(kubeConfig, selectedProvider ? deliveryControllerPodPath(selectedProvider) : '/api/v1/pods', true, DELIVERY_REQUEST_OPTIONS),
+      Promise.all(providerIds.map((providerId) => fetchOptionalDeliveryProviderCrd(kubeConfig, providerId)))
     ]);
     const resourceCount = selectedDefinitions.length;
     const resourceSections = requests
@@ -4783,8 +4746,8 @@ export async function loadLocalDeliveryActivity(runtimeConfig, namespaceScope = 
       const truncated = resourceSections.some((section) => section.available && section.partial === true);
       issues.push(
         truncated
-          ? truncationIssue('delivery-activity', 'Large GitOps resource lists were truncated for this runtime read.')
-          : partialIssue('delivery-activity', 'Some GitOps resources could not be read. Check the agent Kubernetes permissions for the selected provider.')
+          ? truncationIssue('delivery-activity', 'Large delivery resource lists were truncated for this runtime read.')
+          : partialIssue('delivery-activity', 'Some delivery resources could not be read. Check the agent Kubernetes permissions for the selected provider.')
       );
     }
     const podRequest = requests[resourceCount];
@@ -4797,23 +4760,29 @@ export async function loadLocalDeliveryActivity(runtimeConfig, namespaceScope = 
       partial = true;
       issues.push(truncationIssue('delivery-activity', 'The Pod list was truncated for delivery controller detection.'));
     }
-    const crds = selectedProvider
-      ? {
-          items: crdRequest.status === 'fulfilled' && crdRequest.value ? [crdRequest.value] : [],
-          truncated: false
-        }
-      : crdRequest.status === 'fulfilled'
-        ? crdRequest.value
-        : { items: [], truncated: false };
-    if (crds.truncated) {
-      partial = true;
-      issues.push(truncationIssue('delivery-activity', 'The CRD list was truncated for delivery provider detection.'));
-    }
-    const summary = buildRuntimeDeliveryActivity(resourceSections, pods.items, crds.items, new Date().toISOString(), effectiveNamespace, issues, partial);
+    const crds = {
+      items: crdRequest.status === 'fulfilled' ? crdRequest.value.filter(Boolean) : [],
+      truncated: false
+    };
+    const summary = buildSharedDeliveryActivitySummary({
+      fetchedAt: new Date().toISOString(),
+      namespaceScope: effectiveNamespace,
+      resources: resourceSections,
+      pods: pods.items.map(normalizeRuntimePod),
+      customResourceDefinitions: crds.items,
+      issues,
+      partial
+    });
     if (!selectedProvider) return summary;
     return {
       ...summary,
       detectedProviders: summary.detectedProviders.filter((item) => item.providerId === selectedProvider),
+      applications: { ...summary.applications, items: summary.applications.items.filter((item) => item.providerId === selectedProvider) },
+      deployments: { ...summary.deployments, items: summary.deployments.items.filter((item) => item.providerId === selectedProvider) },
+      pipelines: { ...summary.pipelines, items: summary.pipelines.items.filter((item) => item.providerId === selectedProvider) },
+      projects: { ...summary.projects, items: summary.projects.items.filter((item) => item.providerId === selectedProvider) },
+      sources: { ...summary.sources, items: summary.sources.items.filter((item) => item.providerId === selectedProvider) },
+      issuesList: { ...summary.issuesList, items: summary.issuesList.items.filter((item) => item.providerId === selectedProvider) },
       controllers: {
         ...summary.controllers,
         items: summary.controllers.items.filter((item) => item.providerId === selectedProvider)
@@ -4825,7 +4794,7 @@ export async function loadLocalDeliveryActivity(runtimeConfig, namespaceScope = 
 }
 
 function deliveryKindAllowed(providerId, kind) {
-  return DELIVERY_RESOURCE_DEFINITIONS.some((definition) => definition.providerId === providerId && definition.kind.toLowerCase() === String(kind || '').toLowerCase());
+  return sharedDeliveryKindAllowed(providerId, kind);
 }
 
 async function fetchKubeEventList(kubeConfig, path, fieldSelector) {
@@ -5778,7 +5747,7 @@ export async function loadLocalComponentInventory(runtimeConfig) {
         [
           ...matchNamespaceEvidence(namespaces, 'argocd'),
           ...matchDeploymentEvidence(deployments, (meta) => meta.namespace === 'argocd' || meta.name.startsWith('argocd-')),
-          ...matchCrdEvidence(crds, (record) => stringOrUndefined(asRecord(record.spec)?.group) === 'argoproj.io')
+          ...matchCrdEvidence(crds, (record) => metadataFor(record).name === 'applications.argoproj.io')
         ]
       ),
       componentSummary(
@@ -5791,6 +5760,81 @@ export async function loadLocalComponentInventory(runtimeConfig) {
           ...matchDeploymentEvidence(deployments, (meta) => meta.namespace === 'flux-system' || meta.name.includes('flux')),
           ...matchCrdEvidence(crds, (record) => stringOrUndefined(asRecord(record.spec)?.group)?.includes('toolkit.fluxcd.io') === true)
         ]
+      ),
+      componentSummary(
+        'tekton',
+        'Tekton',
+        'continuous-delivery',
+        'Tekton Pipelines workloads or tekton.dev CRDs.',
+        [
+          ...matchDeploymentEvidence(deployments, (meta) => /tekton|pipeline-controller/i.test(`${meta.namespace}/${meta.name}`)),
+          ...matchCrdEvidence(crds, (record) => metadataFor(record).name === 'pipelineruns.tekton.dev')
+        ]
+      ),
+      componentSummary(
+        'argo-workflows',
+        'Argo Workflows',
+        'continuous-delivery',
+        'Argo Workflows controller workloads or Workflow CRDs.',
+        [
+          ...matchDeploymentEvidence(deployments, (meta) => /workflow-controller|argo-server/i.test(meta.name)),
+          ...matchCrdEvidence(crds, (record) => metadataFor(record).name === 'workflows.argoproj.io')
+        ]
+      ),
+      componentSummary(
+        'argo-rollouts',
+        'Argo Rollouts',
+        'continuous-delivery',
+        'Argo Rollouts controller workloads or Rollout CRDs.',
+        [
+          ...matchDeploymentEvidence(deployments, (meta) => /argo-rollouts/i.test(`${meta.namespace}/${meta.name}`)),
+          ...matchCrdEvidence(crds, (record) => metadataFor(record).name === 'rollouts.argoproj.io')
+        ]
+      ),
+      componentSummary(
+        'flagger',
+        'Flagger',
+        'continuous-delivery',
+        'Flagger controller workloads or Canary CRDs.',
+        [
+          ...matchDeploymentEvidence(deployments, (meta) => /flagger/i.test(`${meta.namespace}/${meta.name}`)),
+          ...matchCrdEvidence(crds, (record) => metadataFor(record).name === 'canaries.flagger.app')
+        ]
+      ),
+      componentSummary(
+        'jenkins',
+        'Jenkins',
+        'continuous-delivery',
+        'Jenkins workloads detected. Pipeline history requires a future agent-side API integration.',
+        [...matchDeploymentEvidence(deployments, (meta) => /(^|-)jenkins($|-)/i.test(meta.name))]
+      ),
+      componentSummary(
+        'gitlab-ci',
+        'GitLab CI Runner',
+        'continuous-delivery',
+        'GitLab Runner workloads detected. Pipeline history requires a future agent-side API integration.',
+        [...matchDeploymentEvidence(deployments, (meta) => /gitlab.*runner|gitlab-runner/i.test(meta.name))]
+      ),
+      componentSummary(
+        'drone',
+        'Drone',
+        'continuous-delivery',
+        'Drone workloads detected. Pipeline history requires a future agent-side API integration.',
+        [...matchDeploymentEvidence(deployments, (meta) => /(^|-)drone($|-)/i.test(meta.name))]
+      ),
+      componentSummary(
+        'forgejo-actions',
+        'Forgejo Actions',
+        'continuous-delivery',
+        'Forgejo Actions runner workloads detected. Pipeline history requires a future agent-side API integration.',
+        [...matchDeploymentEvidence(deployments, (meta) => /forgejo.*runner|act-runner/i.test(meta.name))]
+      ),
+      componentSummary(
+        'github-actions',
+        'GitHub Actions Runner',
+        'continuous-delivery',
+        'GitHub Actions runner workloads detected. Pipeline history requires a future agent-side API integration.',
+        [...matchDeploymentEvidence(deployments, (meta) => /actions-runner-controller|gha-runner|github.*runner/i.test(meta.name))]
       )
     ]
       .filter(Boolean)

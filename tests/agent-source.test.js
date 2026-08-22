@@ -6,6 +6,7 @@ describe('agent source boundaries', () => {
     const kube = readFileSync('agent/src/kube.js', 'utf8');
     expect(kube).not.toContain('../../src/lib/');
     expect(kube).toContain('../../src/shared/provider-detection.js');
+    expect(kube).toContain('../../src/shared/delivery-activity.js');
     expect(kube).toContain('../../src/shared/runtime-target.js');
     expect(kube).toContain('../../src/cluster-runtime/relationship-runtime.js');
   });
@@ -22,7 +23,7 @@ describe('agent source boundaries', () => {
     const server = readFileSync('agent/src/server.js', 'utf8');
     const kube = readFileSync('agent/src/kube.js', 'utf8');
     expect(server).toContain("url.searchParams.get('provider')");
-    expect(kube).toContain("provider === 'argocd' || provider === 'flux'");
+    expect(kube).toContain('DELIVERY_PROVIDER_IDS.includes(provider)');
     expect(kube).toContain('gatewayApiDefinitionsFromCrds([record]).length > 0');
   });
 });
