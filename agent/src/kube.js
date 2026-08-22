@@ -138,7 +138,7 @@ function requestKubeApi(url, requestOptions) {
   });
 }
 
-export async function fetchKubeJson(kubeConfig, pathWithQuery) {
+export async function fetchKubeJson(kubeConfig, pathWithQuery, options = {}) {
   const url = new URL(pathWithQuery, baseServerUrl(kubeConfig));
   const requestOptions = await kubeConfig.applyToFetchOptions({
     method: 'GET',
@@ -147,7 +147,10 @@ export async function fetchKubeJson(kubeConfig, pathWithQuery) {
     }
   });
 
-  const response = await requestKubeApi(url, requestOptions);
+  const response = await requestKubeApi(url, {
+    ...requestOptions,
+    ...(Number(options.timeoutMs) > 0 ? { timeout: Number(options.timeoutMs) } : {})
+  });
   if (response.status < 200 || response.status >= 300) {
     throw new Error(`Kubernetes API responded with HTTP ${response.status}.`);
   }
@@ -174,22 +177,24 @@ export async function fetchKubeText(kubeConfig, pathWithQuery) {
   return response.body;
 }
 
-export async function fetchKubeList(kubeConfig, path, allowMissing = false) {
+export async function fetchKubeList(kubeConfig, path, allowMissing = false, options = {}) {
   const items = [];
   let page = 0;
   let continueToken = null;
+  const pageLimit = Math.max(1, Math.min(PAGE_LIMIT, Number(options.pageLimit) || PAGE_LIMIT));
+  const maxPages = Math.max(1, Math.min(MAX_PAGES, Number(options.maxPages) || MAX_PAGES));
 
-  while (page < MAX_PAGES) {
+  while (page < maxPages) {
     const [pathname, rawSearch = ''] = path.split('?');
     const search = new URLSearchParams(rawSearch);
-    search.set('limit', String(PAGE_LIMIT));
+    search.set('limit', String(pageLimit));
     if (continueToken) {
       search.set('continue', continueToken);
     }
 
     let payload;
     try {
-      payload = await fetchKubeJson(kubeConfig, `${pathname}?${search.toString()}`);
+      payload = await fetchKubeJson(kubeConfig, `${pathname}?${search.toString()}`, options);
     } catch (error) {
       if (allowMissing && error instanceof Error && /HTTP 404/.test(error.message)) {
         return { items, truncated: false, missing: true };
@@ -4425,24 +4430,57 @@ function deliveryResourcePath(definition, version, namespaceScope) {
   return namespacePath(`${base}/${definition.resource}`, `${base}/namespaces/:namespace/${definition.resource}`, namespaceScope);
 }
 
+const DELIVERY_REQUEST_OPTIONS = { timeoutMs: 6_000, pageLimit: 200, maxPages: 3 };
+
 async function fetchOptionalDeliveryResource(kubeConfig, definition, namespaceScope) {
+  let lastError = null;
   for (const version of definition.versions) {
     try {
-      const list = await fetchKubeList(kubeConfig, deliveryResourcePath(definition, version, namespaceScope));
+      const list = await fetchKubeList(
+        kubeConfig,
+        deliveryResourcePath(definition, version, namespaceScope),
+        true,
+        DELIVERY_REQUEST_OPTIONS
+      );
+      if (list.missing) continue;
       return {
         definition,
         items: list.items,
-        partial: list.truncated
+        partial: list.truncated,
+        available: true
       };
-    } catch {
+    } catch (error) {
+      lastError = error;
       // GitOps CRDs are optional and served versions differ by installation.
     }
   }
   return {
     definition,
     items: [],
-    partial: false
+    partial: lastError !== null,
+    available: false
   };
+}
+
+function deliveryControllerPodPath(provider) {
+  const namespace = provider === 'argocd' ? 'argocd' : 'flux-system';
+  return `/api/v1/namespaces/${namespace}/pods`;
+}
+
+function deliveryProviderCrdName(provider) {
+  return provider === 'argocd' ? 'applications.argoproj.io' : 'kustomizations.kustomize.toolkit.fluxcd.io';
+}
+
+async function fetchOptionalDeliveryProviderCrd(kubeConfig, provider) {
+  try {
+    return await fetchKubeJson(
+      kubeConfig,
+      `/apis/apiextensions.k8s.io/v1/customresourcedefinitions/${deliveryProviderCrdName(provider)}`,
+      DELIVERY_REQUEST_OPTIONS
+    );
+  } catch {
+    return null;
+  }
 }
 
 function deliveryNestedString(record, pathParts) {
@@ -4673,7 +4711,7 @@ function buildRuntimeDeliveryActivity(resourceSections, podsRaw, crdsRaw, fetche
       }
     }
   }
-  const pods = asRecordArray(podsRaw).map(normalizePod);
+  const pods = asRecordArray(podsRaw).map(normalizeRuntimePod);
   const controllers = pods
     .map((pod) => {
       const providerId = deliveryProviderForPod(pod);
@@ -4700,6 +4738,11 @@ function buildRuntimeDeliveryActivity(resourceSections, podsRaw, crdsRaw, fetche
   };
 }
 
+/**
+ * @param {any} runtimeConfig
+ * @param {string | null} [namespaceScope]
+ * @param {'argocd' | 'flux' | null} [provider]
+ */
 export async function loadLocalDeliveryActivity(runtimeConfig, namespaceScope = null, provider = null) {
   try {
     const kubeConfig = loadLocalKubeConfig(runtimeConfig);
@@ -4708,10 +4751,18 @@ export async function loadLocalDeliveryActivity(runtimeConfig, namespaceScope = 
     const selectedDefinitions = selectedProvider
       ? DELIVERY_RESOURCE_DEFINITIONS.filter((definition) => definition.providerId === selectedProvider)
       : DELIVERY_RESOURCE_DEFINITIONS;
+    const supportRequests = selectedProvider
+      ? [
+          fetchKubeList(kubeConfig, deliveryControllerPodPath(selectedProvider), true, DELIVERY_REQUEST_OPTIONS),
+          fetchOptionalDeliveryProviderCrd(kubeConfig, selectedProvider)
+        ]
+      : [
+          fetchKubeList(kubeConfig, namespacePath('/api/v1/pods', '/api/v1/namespaces/:namespace/pods', effectiveNamespace)),
+          fetchKubeList(kubeConfig, '/apis/apiextensions.k8s.io/v1/customresourcedefinitions')
+        ];
     const requests = await Promise.allSettled([
       ...selectedDefinitions.map((definition) => fetchOptionalDeliveryResource(kubeConfig, definition, effectiveNamespace)),
-      fetchKubeList(kubeConfig, namespacePath('/api/v1/pods', '/api/v1/namespaces/:namespace/pods', effectiveNamespace)),
-      fetchKubeList(kubeConfig, '/apis/apiextensions.k8s.io/v1/customresourcedefinitions')
+      ...supportRequests
     ]);
     const resourceCount = selectedDefinitions.length;
     const resourceSections = requests
@@ -4722,13 +4773,19 @@ export async function loadLocalDeliveryActivity(runtimeConfig, namespaceScope = 
           : {
               definition: selectedDefinitions[index],
               items: [],
-              partial: true
+              partial: true,
+              available: false
             }
       );
     const issues = [];
     let partial = resourceSections.some((section) => section.partial === true);
     if (partial) {
-      issues.push(truncationIssue('delivery-activity', 'Large GitOps resource lists were truncated for this runtime read.'));
+      const truncated = resourceSections.some((section) => section.available && section.partial === true);
+      issues.push(
+        truncated
+          ? truncationIssue('delivery-activity', 'Large GitOps resource lists were truncated for this runtime read.')
+          : partialIssue('delivery-activity', 'Some GitOps resources could not be read. Check the agent Kubernetes permissions for the selected provider.')
+      );
     }
     const podRequest = requests[resourceCount];
     const crdRequest = requests[resourceCount + 1];
@@ -4740,7 +4797,14 @@ export async function loadLocalDeliveryActivity(runtimeConfig, namespaceScope = 
       partial = true;
       issues.push(truncationIssue('delivery-activity', 'The Pod list was truncated for delivery controller detection.'));
     }
-    const crds = crdRequest.status === 'fulfilled' ? crdRequest.value : { items: [], truncated: false };
+    const crds = selectedProvider
+      ? {
+          items: crdRequest.status === 'fulfilled' && crdRequest.value ? [crdRequest.value] : [],
+          truncated: false
+        }
+      : crdRequest.status === 'fulfilled'
+        ? crdRequest.value
+        : { items: [], truncated: false };
     if (crds.truncated) {
       partial = true;
       issues.push(truncationIssue('delivery-activity', 'The CRD list was truncated for delivery provider detection.'));

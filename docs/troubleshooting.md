@@ -62,6 +62,8 @@ Agent `v0.1.6` and newer use the installed binary release for both heartbeat and
 
 For `v0.1.29+`, use the **Update agent** command shown on the active agent row. It runs the installer in tokenless update mode. A one-time pairing token is only for first installation or the explicit **Replace agent** recovery flow.
 
+Agent `v0.1.30+` fixes the Argo CD Delivery Activity runtime path. If an agent-side runtime read fails, `journalctl -u kubi-agent` now includes the failed `/v1/...` endpoint and a sanitized reason.
+
 ## Control-plane timeouts
 
 The agent uses bounded requests for registration, heartbeats, discovery sync, and token introspection. A `Control-plane request timed out after 15000ms` message means the host did not receive an HTTP response from `app.kubi.live` in time. Verify outbound TCP/443, DNS, proxy policy, and the SaaS health endpoint; the running agent will retry its normal heartbeat and relay lifecycle without spawning overlapping work.

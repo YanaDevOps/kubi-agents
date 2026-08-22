@@ -77,7 +77,11 @@ describe('agent component detection', () => {
         '/apis/networking.k8s.io/v1/ingressclasses': [],
         '/apis/apiextensions.k8s.io/v1/customresourcedefinitions': [
           { metadata: { name: 'vmsingles.operator.victoriametrics.com' }, spec: { group: 'operator.victoriametrics.com' } },
-          { metadata: { name: 'vaultauths.secrets.hashicorp.com' }, spec: { group: 'secrets.hashicorp.com' } }
+          { metadata: { name: 'vaultauths.secrets.hashicorp.com' }, spec: { group: 'secrets.hashicorp.com' } },
+          {
+            metadata: { name: 'ingressroutes.traefik.io' },
+            spec: { group: 'traefik.io', names: { kind: 'IngressRoute', plural: 'ingressroutes' }, versions: [{ name: 'v1alpha1', served: true }] }
+          }
         ]
       };
       response.writeHead(resources[pathname] ? 200 : 404, { 'content-type': 'application/json' });
@@ -108,6 +112,7 @@ describe('agent component detection', () => {
       expect(response.items.find((item) => item.key === 'flannel')).toMatchObject({ category: 'networking', status: 'detected' });
       expect(response.items.find((item) => item.key === 'hashicorp-vault')).toMatchObject({ category: 'security', status: 'detected' });
       expect(response.items.find((item) => item.key === 'vault-secrets-operator')).toMatchObject({ category: 'security', status: 'detected' });
+      expect(response.items.find((item) => item.key === 'gateway-api')).toBeUndefined();
       expect(response.summary.storage).toBe(1);
       expect(response.summary.security).toBe(2);
     } finally {

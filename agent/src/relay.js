@@ -75,7 +75,13 @@ export function createAgentRelayClient(options) {
   const runCommand = async (message) => {
     const command = message.command || {};
     if (command.kind === 'http') {
-      return options.dispatch(requestStream(command.request || {}));
+      const result = await options.dispatch(requestStream(command.request || {}));
+      if (Number(result?.status) >= 500) {
+        const endpoint = String(command.request?.url || '/v1').split('?')[0];
+        const message = typeof result?.payload?.message === 'string' ? result.payload.message : `HTTP ${result.status}`;
+        options.onError?.(new Error(`Hosted relay request ${endpoint} failed: ${message}`));
+      }
+      return result;
     }
     if (command.kind === 'probe') {
       if (options.probe) {

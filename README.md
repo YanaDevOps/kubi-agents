@@ -29,7 +29,7 @@ Agent `v0.1.25` adds an opt-in balanced Prometheus detail level with per-node, p
 Agent `v0.1.26` adds provider-neutral CSI health from CSINode, VolumeAttachment, CSIStorageCapacity, and positively matched CSI plugin Pods. It groups Ceph RBD/CephFS into one Rook/Ceph backend and adds read-only Rook/Ceph and Longhorn CRD/exporter adapters.
 Agent `v0.1.27` adds read-only OpenEBS and Portworx adapters. OpenEBS Mayastor, LVM LocalPV, and ZFS LocalPV are grouped into one provider; Portworx adds nodes, pools, volumes, I/O, and host connection health. Context-scoped bearer and mTLS exporter endpoints remain local to the agent host.
 Agent `v0.1.28` adds PV/PVC event reads, Vault security ecosystem detection, Argo CD multi-source applications, and more precise PVC usage diagnostics. Gateway API is reported as an ingress capability rather than a service mesh. Every deep storage adapter is now explicit opt-in; generic CSI inventory remains enabled.
-Agent `v0.1.29` adds verified tokenless in-place upgrades that preserve the existing agent identity, configuration, and KUBI connections. Delivery Activity reads only the selected Argo CD or Flux APIs, and Gateway API detection requires a supported served CRD.
+Agent `v0.1.30` fixes agent-backed Argo CD Delivery Activity, bounds provider-specific Kubernetes reads, and reports failed relay endpoints in the agent logs. Tokenless in-place upgrades and strict Gateway API evidence remain available from `v0.1.29`.
 
 ## Install
 
