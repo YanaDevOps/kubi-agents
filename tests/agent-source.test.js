@@ -4,11 +4,14 @@ import { readFileSync } from 'node:fs';
 describe('agent source boundaries', () => {
   test('standalone agent does not import from kubi-saas src/lib paths', () => {
     const kube = readFileSync('agent/src/kube.js', 'utf8');
+    const server = readFileSync('agent/src/server.js', 'utf8');
     expect(kube).not.toContain('../../src/lib/');
+    expect(server).not.toContain('../../src/lib/');
     expect(kube).toContain('../../src/shared/provider-detection.js');
     expect(kube).toContain('../../src/shared/delivery-activity.js');
     expect(kube).toContain('../../src/shared/runtime-target.js');
     expect(kube).toContain('../../src/cluster-runtime/relationship-runtime.js');
+    expect(server).toContain('../../src/shared/mcp-catalog.js');
   });
 
   test('CLI documents supported commands', () => {

@@ -4,7 +4,7 @@ KUBI Agent reads delivery state from Kubernetes APIs through the selected kubeco
 
 ## Native coverage
 
-- Argo CD: Applications, ApplicationSets, AppProjects, source revisions, health, sync policy, and sync windows.
+- Argo CD: Applications, ApplicationSets, AppProjects, all source references, health, structured sync policy, project consumers, destinations, resource rules, roles, and sync windows.
 - Flux: Kustomizations, HelmReleases, source objects, and ImageUpdateAutomations.
 - Tekton: Pipelines, Tasks, PipelineRuns, and TaskRuns.
 - Argo Workflows: Workflows, CronWorkflows, WorkflowTemplates, and ClusterWorkflowTemplates.
@@ -12,6 +12,8 @@ KUBI Agent reads delivery state from Kubernetes APIs through the selected kubeco
 - Flagger: Canaries, MetricTemplates, and AlertProviders.
 
 Reads are bounded and provider-specific. Missing CRDs are treated as an uninstalled provider, while permission failures are reported as partial coverage.
+
+Repository URLs are sanitized before they leave the agent. Helm value-file names and parameter names may be shown, but parameter values are never retained. The Kubernetes Application condition exposes an orphaned-resource count, not the exact Resource Tree. KUBI therefore reports that count honestly; exact orphan object names require a future opt-in Argo CD Resource Tree API integration.
 
 ## Detection-only providers
 

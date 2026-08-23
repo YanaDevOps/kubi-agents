@@ -43,6 +43,7 @@ import {
   saveAlertingConfig,
   testAlertingChannel
 } from './alerting.js';
+import { MCP_RESOURCE_CATALOG, mcpToolDefinitions } from '../../src/shared/mcp-catalog.js';
 import { loadLocalStorageDriverOverview } from './storage-drivers.js';
 
 function json(response, status, payload, headers = {}) {
@@ -163,39 +164,12 @@ function buildMCPCapabilities(runtimeConfig) {
     readOnly: true,
     generatedAt: new Date().toISOString(),
     capabilities: {
-      resources: [
-        { name: 'overview', description: 'Cluster overview snapshot', endpoint: `${baseUrl}/overview` },
-        { name: 'topology', description: 'Nodes, pods, services topology', endpoint: `${baseUrl}/topology` },
-        { name: 'ports', description: 'Service and container port mappings', endpoint: `${baseUrl}/ports` },
-        { name: 'rbac', description: 'Roles, bindings, effective permissions', endpoint: `${baseUrl}/rbac` },
-        { name: 'storage', description: 'Storage classes, PV, PVC, CSI', endpoint: `${baseUrl}/storage` },
-        { name: 'validation', description: 'Validation findings and severities', endpoint: `${baseUrl}/validation` },
-        { name: 'metrics', description: 'Metrics-server snapshots if available', endpoint: `${baseUrl}/metrics` }
-      ],
-      tools: [
-        {
-          name: 'kubi_get_overview',
-          description: 'Read cluster overview data',
-          inputSchema: { type: 'object', properties: {} }
-        },
-        {
-          name: 'kubi_get_resource',
-          description: 'Read a specific KUBI read-only local agent endpoint',
-          inputSchema: {
-            type: 'object',
-            properties: {
-              path: {
-                type: 'string',
-                description: 'Read-only local agent API path under /v1',
-                enum: ['/v1/overview', '/v1/topology', '/v1/ports', '/v1/storage', '/v1/validation', '/v1/metrics', '/v1/services', '/v1/rbac']
-              },
-              namespace: { type: 'string', description: 'Optional namespace scope' },
-              labelSelector: { type: 'string', description: 'Optional Kubernetes label selector' }
-            },
-            required: ['path']
-          }
-        }
-      ]
+      resources: MCP_RESOURCE_CATALOG.map((resource) => ({
+        name: resource.id,
+        description: resource.description,
+        endpoint: `${baseUrl}${resource.path.slice('/v1'.length)}`
+      })),
+      tools: mcpToolDefinitions()
     },
     safety: [
       'KUBI MCP is observe-only: mutating cluster requests are not exposed.',

@@ -174,12 +174,70 @@ export function sanitizeDeliveryUrl(value) {
 function sourceReferences(value) {
   const spec = record(record(value).spec);
   const rawSources = records(spec.sources).length ? records(spec.sources) : spec.source ? [record(spec.source)] : [];
-  return rawSources.map((source) => ({
-    url: sanitizeDeliveryUrl(source.repoURL),
-    chart: text(source.chart),
-    path: text(source.path),
-    targetRevision: text(source.targetRevision)
-  }));
+  return rawSources.map((source) => {
+    const helm = record(source.helm);
+    const parameterNames = records(helm.parameters).map((parameter) => text(parameter.name)).filter(Boolean);
+    const valueFiles = strings(helm.valueFiles);
+    return {
+      url: sanitizeDeliveryUrl(source.repoURL),
+      chart: text(source.chart),
+      path: text(source.path),
+      targetRevision: text(source.targetRevision),
+      ref: text(source.ref),
+      ...(text(helm.releaseName) || valueFiles.length || parameterNames.length
+        ? { helm: { releaseName: text(helm.releaseName), valueFiles, parameterNames } }
+        : {})
+    };
+  });
+}
+
+function syncPolicyDetails(spec) {
+  const policy = record(spec.syncPolicy);
+  const automatedValue = policy.automated;
+  const automated = record(automatedValue);
+  const configured = automatedValue !== undefined && automatedValue !== null;
+  const enabled = configured && automated.enabled !== false;
+  const retry = record(policy.retry);
+  const backoff = record(retry.backoff);
+  const metadata = record(policy.managedNamespaceMetadata);
+  const labels = record(metadata.labels);
+  const annotations = record(metadata.annotations);
+  const retryDetails = {
+    limit: number(retry.limit),
+    duration: text(backoff.duration),
+    factor: number(backoff.factor),
+    maxDuration: text(backoff.maxDuration)
+  };
+  const hasRetry = Object.values(retryDetails).some((value) => value !== undefined);
+  const managedNamespaceMetadata = {
+    labelKeys: Object.keys(labels).sort(),
+    annotationKeys: Object.keys(annotations).sort()
+  };
+  const hasManagedMetadata = managedNamespaceMetadata.labelKeys.length > 0 || managedNamespaceMetadata.annotationKeys.length > 0;
+  return {
+    mode: enabled ? 'Automated' : 'Manual',
+    automated: {
+      enabled,
+      prune: automated.prune === true,
+      selfHeal: automated.selfHeal === true,
+      allowEmpty: automated.allowEmpty === true
+    },
+    syncOptions: strings(policy.syncOptions),
+    ...(hasRetry ? { retry: retryDetails } : {}),
+    ...(hasManagedMetadata ? { managedNamespaceMetadata } : {})
+  };
+}
+
+function orphanedResourceSummary(sourceConditions) {
+  const condition = sourceConditions.find((item) => item.type.toLowerCase() === 'orphanedresourcewarning');
+  if (!condition) return undefined;
+  const match = `${condition.message || ''}`.match(/has\s+(\d+)\s+orphaned resources?/i);
+  const count = match ? Number(match[1]) : undefined;
+  return {
+    ...(Number.isFinite(count) ? { count } : {}),
+    detailsAvailable: false,
+    message: 'Argo CD reports the orphaned-resource count in the Application condition. Exact objects require the Argo CD Resource Tree API and are not present in the Kubernetes Application resource.'
+  };
 }
 
 function durationMs(value) {
@@ -272,6 +330,7 @@ function parseDeployment(definition, value) {
 
   if (definition.parser === 'argo-application') {
     const sources = sourceReferences(value);
+    const policy = syncPolicyDetails(spec);
     const history = records(statusRecord.history);
     const latestHistory = history.sort((left, right) => Date.parse(text(right.deployedAt) || '') - Date.parse(text(left.deployedAt) || ''))[0];
     const childApplication = records(statusRecord.resources).some((resource) => text(resource.group) === 'argoproj.io' && text(resource.kind) === 'Application');
@@ -287,7 +346,9 @@ function parseDeployment(definition, value) {
       destination: nestedText(value, ['spec', 'destination', 'name']) || nestedText(value, ['spec', 'destination', 'server']),
       project: text(spec.project) || 'default',
       pattern: childApplication ? 'app-of-apps' : 'standard',
-      syncPolicy: record(spec.syncPolicy).automated ? 'Automated' : 'Manual'
+      syncPolicy: policy.mode,
+      syncPolicyDetails: policy,
+      orphanedResources: orphanedResourceSummary(sourceConditions)
     };
   }
 
@@ -423,20 +484,60 @@ function parseProject(definition, value, now) {
     status: state.status,
     health: state.health,
     usedByCount: 0,
+    usedBy: [],
     unused: true,
     conditions: sourceConditions
   };
   if (definition.parser === 'argo-project') {
     const roles = records(spec.roles);
     const windows = records(spec.syncWindows).map((window) => syncWindowState(window, now));
+    const restriction = (value) => records(value).map((item) => ({ group: text(item.group) || '', kind: text(item.kind) || '*' }));
+    const sourceRepos = strings(spec.sourceRepos).map((value) => value === '*' || value.startsWith('!') ? value : sanitizeDeliveryUrl(value) || value);
+    const configuration = {
+      description: text(spec.description),
+      sourceRepos,
+      sourceNamespaces: strings(spec.sourceNamespaces),
+      destinations: records(spec.destinations).map((item) => ({
+        namespace: text(item.namespace) || '*',
+        server: sanitizeDeliveryUrl(item.server),
+        name: text(item.name)
+      })),
+      destinationServiceAccounts: records(spec.destinationServiceAccounts).map((item) => ({
+        namespace: text(item.namespace) || '*',
+        server: sanitizeDeliveryUrl(item.server),
+        name: text(item.name),
+        defaultServiceAccount: text(item.defaultServiceAccount)
+      })),
+      clusterResourceWhitelist: restriction(spec.clusterResourceWhitelist),
+      clusterResourceBlacklist: restriction(spec.clusterResourceBlacklist),
+      namespaceResourceWhitelist: restriction(spec.namespaceResourceWhitelist),
+      namespaceResourceBlacklist: restriction(spec.namespaceResourceBlacklist),
+      roles: roles.map((role) => ({
+        name: text(role.name) || 'unnamed',
+        description: text(role.description),
+        groups: strings(role.groups),
+        policies: strings(role.policies)
+      })),
+      orphanedResources: {
+        warn: record(spec.orphanedResources).warn === true,
+        ignored: records(record(spec.orphanedResources).ignore).map((item) => ({
+          group: text(item.group),
+          kind: text(item.kind) || '*',
+          name: text(item.name) || '*'
+        }))
+      },
+      permitOnlyProjectScopedClusters: spec.permitOnlyProjectScopedClusters === true,
+      signatureKeys: records(spec.signatureKeys).map((item) => text(item.keyID) || text(item.keyId)).filter(Boolean)
+    };
     return {
       ...base,
       status: 'Configured',
       health: 'Healthy',
-      sourceCount: records(spec.sourceRepos).length,
+      sourceCount: sourceRepos.length,
       destinationCount: records(spec.destinations).length,
       roleCount: roles.length,
       syncWindows: windows,
+      configuration,
       details: [
         `${records(spec.clusterResourceWhitelist).length} cluster allow rules`,
         `${records(spec.namespaceResourceWhitelist).length} namespace allow rules`,
@@ -476,9 +577,56 @@ function parseSource(definition, value) {
     url: sanitizeDeliveryUrl(nestedText(value, ['spec', 'url'])),
     updatedAt: updatedAt(value, sourceConditions),
     usedByCount: 0,
+    usedBy: [],
     unused: true,
+    origin: 'resource',
     conditions: sourceConditions
   };
+}
+
+function sourceDisplayName(url, fallback) {
+  if (!url) return fallback || 'source';
+  try {
+    const parsed = new URL(url);
+    const tail = parsed.pathname.split('/').filter(Boolean).at(-1)?.replace(/\.git$/i, '');
+    return tail || parsed.hostname || fallback || 'source';
+  } catch {
+    return url.split('/').filter(Boolean).at(-1)?.replace(/\.git$/i, '') || fallback || 'source';
+  }
+}
+
+function promoteApplicationSources(deployments) {
+  const promoted = new Map();
+  for (const deployment of deployments.filter((item) => item.providerId === 'argocd')) {
+    const consumer = { kind: deployment.kind, namespace: deployment.namespace, name: deployment.name };
+    for (const source of deployment.sources || []) {
+      if (!source.url) continue;
+      const key = `${deployment.providerId}/${deployment.namespace}/${source.url}`;
+      const current = promoted.get(key) || {
+        providerId: deployment.providerId,
+        providerName: deployment.providerName,
+        kind: source.chart ? 'HelmRepositoryRef' : 'GitRepositoryRef',
+        namespace: deployment.namespace,
+        name: sourceDisplayName(source.url, source.chart),
+        status: 'Referenced',
+        url: source.url,
+        usedByCount: 0,
+        usedBy: [],
+        unused: false,
+        origin: 'application-reference',
+        references: [],
+        conditions: []
+      };
+      if (!current.usedBy.some((item) => item.kind === consumer.kind && item.namespace === consumer.namespace && item.name === consumer.name)) {
+        current.usedBy.push(consumer);
+        current.usedByCount += 1;
+      }
+      const referenceKey = JSON.stringify(source);
+      if (!current.references.some((item) => JSON.stringify(item) === referenceKey)) current.references.push(source);
+      promoted.set(key, current);
+    }
+  }
+  return [...promoted.values()];
 }
 
 function controllerProvider(pod) {
@@ -576,13 +724,24 @@ export function buildDeliveryActivitySummary(input) {
       if (section.definition.category === 'source') sources.push(parseSource(section.definition, item));
     }
   }
+  sources.push(...promoteApplicationSources(deployments));
 
-  const projectIndex = new Map(projects.filter((item) => item.kind === 'AppProject').map((item) => [`${item.namespace}/${item.name}`, item]));
+  const argoProjects = projects.filter((item) => item.kind === 'AppProject');
+  const projectIndex = new Map(argoProjects.map((item) => [`${item.namespace}/${item.name}`, item]));
+  const projectsByName = new Map();
+  for (const project of argoProjects) {
+    const matches = projectsByName.get(project.name) || [];
+    matches.push(project);
+    projectsByName.set(project.name, matches);
+  }
   for (const deployment of deployments) {
     if (deployment.providerId === 'argocd' && deployment.project) {
-      const project = projectIndex.get(`${deployment.namespace}/${deployment.project}`);
+      const namedProjects = projectsByName.get(deployment.project) || [];
+      const project = projectIndex.get(`${deployment.namespace}/${deployment.project}`) ||
+        (namedProjects.length === 1 ? namedProjects[0] : undefined);
       if (project) {
         project.usedByCount += 1;
+        project.usedBy.push({ kind: deployment.kind, namespace: deployment.namespace, name: deployment.name });
         project.unused = false;
         deployment.syncWindow = deploymentWindowState(project, deployment);
       }
@@ -596,6 +755,7 @@ export function buildDeliveryActivitySummary(input) {
       const referenced = sourceIndex.get(key);
       if (referenced) {
         referenced.usedByCount += 1;
+        referenced.usedBy.push({ kind: deployment.kind, namespace: deployment.namespace, name: deployment.name });
         referenced.unused = false;
       }
     }
@@ -655,7 +815,7 @@ export function buildDeliveryActivitySummary(input) {
   const applications = deployments.filter((item) => ['argocd', 'flux'].includes(item.providerId));
 
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     namespaceScope: input.namespaceScope && input.namespaceScope !== 'all' ? input.namespaceScope : null,
     fetchedAt,
     issues: runtimeIssues,
