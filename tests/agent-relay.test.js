@@ -8,6 +8,7 @@ describe('hosted relay client', () => {
   test('authenticates outbound and carries runtime requests', async () => {
     let resolveResponse = () => undefined;
     const response = new Promise((resolve) => { resolveResponse = resolve; });
+    const completedRequests = [];
     class FakeRelaySocket extends EventEmitter {
       readyState = 1;
 
@@ -44,6 +45,9 @@ describe('hosted relay client', () => {
       },
       async dispatch(request) {
         return { status: 200, payload: { url: request.url }, headers: {} };
+      },
+      onRequestComplete(request) {
+        completedRequests.push(request);
       }
     });
 
@@ -55,6 +59,9 @@ describe('hosted relay client', () => {
         requestId: 'request-1',
         result: { status: 200, payload: { url: '/v1/test' } }
       });
+      expect(completedRequests).toEqual([
+        expect.objectContaining({ endpoint: '/v1/test', status: 200, durationMs: expect.any(Number) })
+      ]);
     } finally {
       relay.close();
     }

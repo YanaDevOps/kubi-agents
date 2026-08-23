@@ -32,6 +32,7 @@ Agent `v0.1.28` adds PV/PVC event reads, Vault security ecosystem detection, Arg
 Agent `v0.1.30` fixes agent-backed Argo CD Delivery Activity, bounds provider-specific Kubernetes reads, and reports failed relay endpoints in the agent logs. Tokenless in-place upgrades and strict Gateway API evidence remain available from `v0.1.29`.
 Agent `v0.1.31` adds bounded Kubernetes-native Delivery Activity reads for Argo CD, Flux, Tekton, Argo Workflows, Argo Rollouts, and Flagger. Jenkins, GitLab Runner, Drone, Forgejo Actions, and GitHub Actions are detected from cluster workloads but remain detection-only until optional agent-side API integrations are available. Source credentials and Kubernetes Secret values are not returned.
 Agent `v0.1.32` aligns the local MCP capability catalog with the hosted KUBI MCP server and expands Argo CD normalization with AppProject consumers/configuration, all Application sources, structured sync policy, and sanitized repository references. Runtime API compatibility remains v2.
+Agent `v0.1.33` limits all-provider Delivery Activity reads to providers detected from installed CRDs, records delivery request status and latency in the local journal, and extends the hosted response deadline for slower Kubernetes APIs. Runtime API compatibility remains v2.
 
 ## Install
 

@@ -75,13 +75,20 @@ export function createAgentRelayClient(options) {
   const runCommand = async (message) => {
     const command = message.command || {};
     if (command.kind === 'http') {
-      const result = await options.dispatch(requestStream(command.request || {}));
-      if (Number(result?.status) >= 500) {
-        const endpoint = String(command.request?.url || '/v1').split('?')[0];
-        const message = typeof result?.payload?.message === 'string' ? result.payload.message : `HTTP ${result.status}`;
-        options.onError?.(new Error(`Hosted relay request ${endpoint} failed: ${message}`));
+      const endpoint = String(command.request?.url || '/v1').split('?')[0];
+      const startedAt = Date.now();
+      try {
+        const result = await options.dispatch(requestStream(command.request || {}));
+        options.onRequestComplete?.({ endpoint, status: Number(result?.status) || 0, durationMs: Date.now() - startedAt });
+        if (Number(result?.status) >= 500) {
+          const message = typeof result?.payload?.message === 'string' ? result.payload.message : `HTTP ${result.status}`;
+          options.onError?.(new Error(`Hosted relay request ${endpoint} failed: ${message}`));
+        }
+        return result;
+      } catch (error) {
+        options.onRequestComplete?.({ endpoint, status: 0, durationMs: Date.now() - startedAt });
+        throw error;
       }
-      return result;
     }
     if (command.kind === 'probe') {
       if (options.probe) {

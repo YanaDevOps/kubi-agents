@@ -141,6 +141,11 @@ async function runAgent() {
     onError(error) {
       metricsState.errors.relay += 1;
       logger.warn(`KUBI hosted relay: ${error.message}`);
+    },
+    onRequestComplete({ endpoint, status, durationMs }) {
+      const message = `KUBI hosted relay request ${endpoint} completed with HTTP ${status || 'error'} in ${durationMs}ms.`;
+      if (endpoint === '/v1/delivery-activity') logger.info(message);
+      else logger.debug(message);
     }
   });
   relay.start();

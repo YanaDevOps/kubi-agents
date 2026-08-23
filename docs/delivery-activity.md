@@ -13,6 +13,8 @@ KUBI Agent reads delivery state from Kubernetes APIs through the selected kubeco
 
 Reads are bounded and provider-specific. Missing CRDs are treated as an uninstalled provider, while permission failures are reported as partial coverage.
 
+When the UI requests all providers, the agent first reads the bounded CRD inventory and then queries only installed provider APIs. A completed relay read is recorded in the local journal with its HTTP status and duration, without resource payloads or credentials.
+
 Repository URLs are sanitized before they leave the agent. Helm value-file names and parameter names may be shown, but parameter values are never retained. The Kubernetes Application condition exposes an orphaned-resource count, not the exact Resource Tree. KUBI therefore reports that count honestly; exact orphan object names require a future opt-in Argo CD Resource Tree API integration.
 
 ## Detection-only providers

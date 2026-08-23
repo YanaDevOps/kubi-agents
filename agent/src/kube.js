@@ -4439,6 +4439,11 @@ function deliveryProviderCrdName(provider) {
   return DELIVERY_PROVIDER_MARKERS[provider];
 }
 
+function deliveryProviderIdsFromCrds(items) {
+  const names = new Set(asRecordArray(items).map((item) => metadataFor(item).name));
+  return DELIVERY_PROVIDER_IDS.filter((providerId) => names.has(deliveryProviderCrdName(providerId)));
+}
+
 async function fetchOptionalDeliveryProviderCrd(kubeConfig, provider) {
   const crdName = deliveryProviderCrdName(provider);
   if (!crdName) return null;
@@ -4718,18 +4723,36 @@ export async function loadLocalDeliveryActivity(runtimeConfig, namespaceScope = 
     const kubeConfig = loadLocalKubeConfig(runtimeConfig);
     const effectiveNamespace = namespaceScope || runtimeConfig.namespace || null;
     const selectedProvider = DELIVERY_PROVIDER_IDS.includes(provider) ? provider : null;
-    const selectedDefinitions = selectedProvider
-      ? DELIVERY_RESOURCE_DEFINITIONS.filter((definition) => definition.providerId === selectedProvider)
-      : DELIVERY_RESOURCE_DEFINITIONS;
-    const providerIds = selectedProvider ? [selectedProvider] : DELIVERY_PROVIDER_IDS;
-    const requests = await Promise.allSettled([
-      ...selectedDefinitions.map((definition) => fetchOptionalDeliveryResource(kubeConfig, definition, null)),
-      fetchKubeList(kubeConfig, selectedProvider ? deliveryControllerPodPath(selectedProvider) : '/api/v1/pods', true, DELIVERY_REQUEST_OPTIONS),
-      Promise.all(providerIds.map((providerId) => fetchOptionalDeliveryProviderCrd(kubeConfig, providerId)))
+    const supportRequests = await Promise.allSettled([
+      fetchKubeList(
+        kubeConfig,
+        selectedProvider ? deliveryControllerPodPath(selectedProvider) : '/api/v1/pods',
+        true,
+        DELIVERY_REQUEST_OPTIONS
+      ),
+      selectedProvider
+        ? fetchOptionalDeliveryProviderCrd(kubeConfig, selectedProvider)
+        : fetchKubeList(
+            kubeConfig,
+            '/apis/apiextensions.k8s.io/v1/customresourcedefinitions',
+            true,
+            DELIVERY_REQUEST_OPTIONS
+          )
     ]);
-    const resourceCount = selectedDefinitions.length;
-    const resourceSections = requests
-      .slice(0, resourceCount)
+    const podRequest = supportRequests[0];
+    const crdRequest = supportRequests[1];
+    const detectedProviderIds = selectedProvider
+      ? [selectedProvider]
+      : crdRequest.status === 'fulfilled' && !crdRequest.value.truncated
+        ? deliveryProviderIdsFromCrds(crdRequest.value.items)
+        : DELIVERY_PROVIDER_IDS;
+    const selectedDefinitions = DELIVERY_RESOURCE_DEFINITIONS.filter((definition) =>
+      detectedProviderIds.includes(definition.providerId)
+    );
+    const resourceRequests = await Promise.allSettled(
+      selectedDefinitions.map((definition) => fetchOptionalDeliveryResource(kubeConfig, definition, null))
+    );
+    const resourceSections = resourceRequests
       .map((request, index) =>
         request.status === 'fulfilled'
           ? request.value
@@ -4750,8 +4773,6 @@ export async function loadLocalDeliveryActivity(runtimeConfig, namespaceScope = 
           : partialIssue('delivery-activity', 'Some delivery resources could not be read. Check the agent Kubernetes permissions for the selected provider.')
       );
     }
-    const podRequest = requests[resourceCount];
-    const crdRequest = requests[resourceCount + 1];
     const pods =
       podRequest.status === 'fulfilled'
         ? podRequest.value
@@ -4760,10 +4781,18 @@ export async function loadLocalDeliveryActivity(runtimeConfig, namespaceScope = 
       partial = true;
       issues.push(truncationIssue('delivery-activity', 'The Pod list was truncated for delivery controller detection.'));
     }
-    const crds = {
-      items: crdRequest.status === 'fulfilled' ? crdRequest.value.filter(Boolean) : [],
-      truncated: false
-    };
+    const crds = selectedProvider
+      ? {
+          items: crdRequest.status === 'fulfilled' && crdRequest.value ? [crdRequest.value] : [],
+          truncated: false
+        }
+      : crdRequest.status === 'fulfilled'
+        ? crdRequest.value
+        : { items: [], truncated: false };
+    if (crds.truncated) {
+      partial = true;
+      issues.push(truncationIssue('delivery-activity', 'The CRD list was truncated for delivery provider detection.'));
+    }
     const summary = buildSharedDeliveryActivitySummary({
       fetchedAt: new Date().toISOString(),
       namespaceScope: effectiveNamespace,
