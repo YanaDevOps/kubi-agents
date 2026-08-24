@@ -32,6 +32,7 @@ import {
   DELIVERY_PROVIDER_MARKERS,
   DELIVERY_RESOURCE_DEFINITIONS,
   buildDeliveryActivitySummary as buildSharedDeliveryActivitySummary,
+  deliveryDefinitionsForSection,
   deliveryKindAllowed as sharedDeliveryKindAllowed
 } from '../../src/shared/delivery-activity.js';
 import {
@@ -4718,7 +4719,7 @@ function buildRuntimeDeliveryActivity(resourceSections, podsRaw, crdsRaw, fetche
  * @param {string | null} [namespaceScope]
  * @param {'argocd' | 'flux' | 'tekton' | 'argo-workflows' | 'argo-rollouts' | 'flagger' | null} [provider]
  */
-export async function loadLocalDeliveryActivity(runtimeConfig, namespaceScope = null, provider = null) {
+export async function loadLocalDeliveryActivity(runtimeConfig, namespaceScope = null, provider = null, section = null) {
   try {
     const kubeConfig = loadLocalKubeConfig(runtimeConfig);
     const effectiveNamespace = namespaceScope || runtimeConfig.namespace || null;
@@ -4746,8 +4747,9 @@ export async function loadLocalDeliveryActivity(runtimeConfig, namespaceScope = 
       : crdRequest.status === 'fulfilled' && !crdRequest.value.truncated
         ? deliveryProviderIdsFromCrds(crdRequest.value.items)
         : DELIVERY_PROVIDER_IDS;
-    const selectedDefinitions = DELIVERY_RESOURCE_DEFINITIONS.filter((definition) =>
-      detectedProviderIds.includes(definition.providerId)
+    const selectedDefinitions = deliveryDefinitionsForSection(
+      DELIVERY_RESOURCE_DEFINITIONS.filter((definition) => detectedProviderIds.includes(definition.providerId)),
+      section
     );
     const resourceRequests = await Promise.allSettled(
       selectedDefinitions.map((definition) => fetchOptionalDeliveryResource(kubeConfig, definition, null))
@@ -5834,14 +5836,14 @@ export async function loadLocalComponentInventory(runtimeConfig) {
         'jenkins',
         'Jenkins',
         'continuous-delivery',
-        'Jenkins workloads detected. Pipeline history requires a future agent-side API integration.',
+        'Jenkins workloads detected. Configure the local Jenkins instance in agent.yaml to read pipeline history.',
         [...matchDeploymentEvidence(deployments, (meta) => /(^|-)jenkins($|-)/i.test(meta.name))]
       ),
       componentSummary(
         'gitlab-ci',
         'GitLab CI Runner',
         'continuous-delivery',
-        'GitLab Runner workloads detected. Pipeline history requires a future agent-side API integration.',
+        'GitLab Runner workloads detected. Configure the local GitLab CI instance in agent.yaml to read pipeline history.',
         [...matchDeploymentEvidence(deployments, (meta) => /gitlab.*runner|gitlab-runner/i.test(meta.name))]
       ),
       componentSummary(
@@ -5862,7 +5864,7 @@ export async function loadLocalComponentInventory(runtimeConfig) {
         'github-actions',
         'GitHub Actions Runner',
         'continuous-delivery',
-        'GitHub Actions runner workloads detected. Pipeline history requires a future agent-side API integration.',
+        'GitHub Actions runner workloads detected. Configure the local GitHub Actions instance in agent.yaml to read workflow history.',
         [...matchDeploymentEvidence(deployments, (meta) => /actions-runner-controller|gha-runner|github.*runner/i.test(meta.name))]
       )
     ]

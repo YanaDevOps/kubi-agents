@@ -37,6 +37,19 @@ logging:
   #   max_size_mb: 10
   #   max_files: 5
 
+# Optional external CI run metadata. Credentials are protected local files.
+ci:
+  enabled: false
+  github_actions:
+    enabled: false
+    instances: []
+  gitlab_ci:
+    enabled: false
+    instances: []
+  jenkins:
+    enabled: false
+    instances: []
+
 # Optional deep storage metrics. Generic Kubernetes CSI inventory works without these collectors.
 # Explicitly enable only providers used by this host, then restart kubi-agent.
 storage:
@@ -105,6 +118,8 @@ Use `kubi-agent config validate` before restart and `kubi-agent config show --ef
 By default systemd captures stdout/stderr in journald. Optional file output uses size rotation and never intentionally logs kubeconfig contents, tokens, certificates, or Kubernetes response payloads.
 
 `metrics_exporter` is independent of the KUBI plan and disabled by default. Empty `contexts` collects all unambiguous discovered contexts. `detail_level: aggregate` exports only bounded context totals; explicitly set `detail_level: balanced` to add node, namespace, and workload series for the bundled dashboard. A non-loopback `listen_address` requires `bearer_token_file` plus TLS unless `allow_insecure_http: true` is explicitly set for an already protected private network. See [Prometheus metrics](prometheus-metrics.md).
+
+`ci` is disabled by default. GitHub Actions, GitLab CI, and Jenkins instances use allowlisted repositories, projects, or job roots plus protected credential files. They expose normalized read-only run metadata only. See [External CI pipelines](ci-pipelines.md).
 
 ## Storage driver metrics
 

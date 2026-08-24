@@ -12,6 +12,8 @@ Pairing tokens are one-time and expire after 30 minutes. After registration the 
 
 The loopback listener on `127.0.0.1:47641` remains for local diagnostics and compatibility. Do not expose it publicly; hosted browser traffic uses the outbound relay.
 
+External CI integrations are opt-in and run only in the customer-side agent. Provider credentials are loaded from protected regular files and never returned by effective configuration, logs, or runtime responses. Provider HTTP uses GET only, same-origin redirects, bounded time and response size, and an explicit repository/project/job allowlist. CI logs, artifacts, variables, workspaces, credentials, and mutation endpoints are excluded.
+
 Hosted MCP reads use the same outbound relay and one fixed observe-only resource catalog. The agent never accepts an arbitrary MCP path. Logs, Events, arbitrary custom-resource objects, alerting configuration, Secret values, and all mutations are outside the MCP contract. Secret value fields are removed again at the hosted MCP boundary.
 
 The optional Prometheus endpoint is a separate server and cannot route to the local runtime API. Its default aggregate level emits bounded context totals. The explicit balanced level additionally labels node, namespace, and workload state, but never Pod or container names. Its default bind is `127.0.0.1:9464`; remote binds require a protected bearer-token file and TLS unless authenticated plaintext HTTP is explicitly enabled on a trusted network.

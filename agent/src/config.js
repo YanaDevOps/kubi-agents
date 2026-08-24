@@ -309,6 +309,121 @@ function normalizeStorageDrivers(settings) {
   };
 }
 
+function normalizeCiInstances(settings) {
+  const ci = object(settings.ci, 'ci');
+  const normalizeTls = (value, field) => {
+    const tls = object(value, field);
+    const clientCertFile = optionalString(tls.client_cert_file, `${field}.client_cert_file`);
+    const clientKeyFile = optionalString(tls.client_key_file, `${field}.client_key_file`);
+    if (Boolean(clientCertFile) !== Boolean(clientKeyFile)) {
+      throw new Error(`${field}.client_cert_file and ${field}.client_key_file must be configured together.`);
+    }
+    return {
+      caFile: optionalString(tls.ca_file, `${field}.ca_file`),
+      clientCertFile,
+      clientKeyFile
+    };
+  };
+  const normalizeBaseUrl = (value, field) => {
+    let parsed;
+    try {
+      parsed = new URL(optionalString(value, field));
+    } catch {
+      throw new Error(`${field} must be a valid URL.`);
+    }
+    if (!['https:', 'http:'].includes(parsed.protocol)) throw new Error(`${field} must use http or https.`);
+    if (parsed.username || parsed.password || parsed.search || parsed.hash) {
+      throw new Error(`${field} must not include credentials, query parameters or fragments.`);
+    }
+    return parsed.toString().replace(/\/$/, '');
+  };
+  const normalizeInstanceList = (providerKey, normalize) => {
+    const provider = object(ci[providerKey], `ci.${providerKey}`);
+    if (provider.instances !== undefined && !Array.isArray(provider.instances)) {
+      throw new Error(`ci.${providerKey}.instances must be a list.`);
+    }
+    const instances = (provider.instances || []).map((raw, index) => {
+      const field = `ci.${providerKey}.instances[${index}]`;
+      const instance = object(raw, field);
+      const id = optionalString(instance.id, `${field}.id`);
+      if (!/^[a-z0-9][a-z0-9._-]{0,63}$/i.test(id)) {
+        throw new Error(`${field}.id must use 1-64 letters, digits, dots, underscores or dashes.`);
+      }
+      const auth = object(instance.auth, `${field}.auth`);
+      const normalized = {
+        id,
+        displayName: optionalString(instance.display_name, `${field}.display_name`, id) || id,
+        baseUrl: normalizeBaseUrl(instance.base_url, `${field}.base_url`),
+        timeoutSeconds: boundedNumber(instance.timeout_seconds, `${field}.timeout_seconds`, 8, 1, 30),
+        maxPages: boundedNumber(instance.max_pages, `${field}.max_pages`, 2, 1, 5),
+        maxRuns: boundedNumber(instance.max_runs, `${field}.max_runs`, 100, 10, 500),
+        allowInsecureHttp: optionalBoolean(instance.allow_insecure_http, `${field}.allow_insecure_http`, false),
+        tls: normalizeTls(instance.tls, `${field}.tls`),
+        ...normalize(instance, auth, field)
+      };
+      if (new URL(normalized.baseUrl).protocol === 'http:' && !normalized.allowInsecureHttp) {
+        throw new Error(`${field}.allow_insecure_http must be true for an http base_url.`);
+      }
+      return normalized;
+    });
+    const ids = new Set();
+    for (const instance of instances) {
+      if (ids.has(instance.id)) throw new Error(`Duplicate ci.${providerKey} instance id: ${instance.id}.`);
+      ids.add(instance.id);
+    }
+    return { enabled: optionalBoolean(provider.enabled, `ci.${providerKey}.enabled`, instances.length > 0), instances };
+  };
+
+  const githubActions = normalizeInstanceList('github_actions', (instance, auth, field) => {
+    if (!Array.isArray(instance.repositories) || instance.repositories.length === 0) {
+      throw new Error(`${field}.repositories must contain at least one owner/name entry.`);
+    }
+    const repositories = instance.repositories.map((raw, index) => {
+      const repository = object(raw, `${field}.repositories[${index}]`);
+      return {
+        owner: optionalString(repository.owner, `${field}.repositories[${index}].owner`),
+        name: optionalString(repository.name, `${field}.repositories[${index}].name`)
+      };
+    });
+    if (repositories.some((repository) => !repository.owner || !repository.name)) {
+      throw new Error(`${field}.repositories owner and name are required.`);
+    }
+    const tokenFile = optionalString(auth.token_file, `${field}.auth.token_file`);
+    if (!tokenFile) throw new Error(`${field}.auth.token_file is required.`);
+    return { repositories, auth: { tokenFile } };
+  });
+  const gitlabCi = normalizeInstanceList('gitlab_ci', (instance, auth, field) => {
+    const projects = strings(instance.projects, `${field}.projects`);
+    if (projects.length === 0) throw new Error(`${field}.projects must contain at least one project path.`);
+    const tokenFile = optionalString(auth.token_file, `${field}.auth.token_file`);
+    if (!tokenFile) throw new Error(`${field}.auth.token_file is required.`);
+    return { projects, auth: { tokenFile } };
+  });
+  const jenkins = normalizeInstanceList('jenkins', (instance, auth, field) => {
+    const allowedJobRoots = strings(instance.allowed_job_roots, `${field}.allowed_job_roots`);
+    if (allowedJobRoots.length === 0) throw new Error(`${field}.allowed_job_roots must contain at least one job or folder.`);
+    const usernameFile = optionalString(auth.username_file, `${field}.auth.username_file`);
+    const apiTokenFile = optionalString(auth.api_token_file, `${field}.auth.api_token_file`);
+    if (!usernameFile || !apiTokenFile) throw new Error(`${field}.auth.username_file and api_token_file are required.`);
+    return {
+      allowedJobRoots,
+      maxDepth: boundedNumber(instance.max_depth, `${field}.max_depth`, 4, 1, 10),
+      maxJobs: boundedNumber(instance.max_jobs, `${field}.max_jobs`, 100, 1, 500),
+      auth: {
+        usernameFile,
+        apiTokenFile
+      }
+    };
+  });
+
+  return {
+    enabled: optionalBoolean(ci.enabled, 'ci.enabled', false),
+    githubActions,
+    gitlabCi,
+    jenkins
+  };
+}
+
 export function validateAgentSettings(settings) {
   const discovery = settings.discovery && typeof settings.discovery === 'object' ? settings.discovery : {};
   const logging = settings.logging && typeof settings.logging === 'object' ? settings.logging : {};
@@ -326,10 +441,12 @@ export function validateAgentSettings(settings) {
   }
   const storageDrivers = normalizeStorageDrivers(settings);
   const metricsExporter = normalizeMetricsExporter(settings);
+  const ci = normalizeCiInstances(settings);
   return {
     kubeconfigPaths,
     kubeconfigDirectories,
     metricsExporter,
+    ci,
     ...(storageDrivers ? { storageDrivers } : {})
   };
 }
@@ -373,7 +490,8 @@ export function resolveAgentRuntimeConfig(config, runningRelease = {}) {
     alertingHistoryPath: process.env.KUBI_AGENT_ALERTING_HISTORY || config.alertingHistoryPath || null,
     logging: settings.logging && typeof settings.logging === 'object' ? settings.logging : {},
     metricsExporter: validated.metricsExporter,
-    storageDrivers: validated.storageDrivers || {}
+    storageDrivers: validated.storageDrivers || {},
+    ci: validated.ci
   };
 }
 
@@ -398,6 +516,16 @@ export function redactAgentRuntimeConfig(runtimeConfig) {
         if (endpoint.clientKeyFile) endpoint.clientKeyFile = '[redacted]';
         if (endpoint.bearerTokenFile) endpoint.bearerTokenFile = '[redacted]';
       }
+    }
+  }
+  for (const provider of ['githubActions', 'gitlabCi', 'jenkins']) {
+    for (const instance of clone.ci?.[provider]?.instances || []) {
+      if (instance.auth) {
+        instance.auth = Object.fromEntries(Object.keys(instance.auth).map((name) => [name, '[redacted]']));
+      }
+      if (instance.tls?.caFile) instance.tls.caFile = '[redacted]';
+      if (instance.tls?.clientCertFile) instance.tls.clientCertFile = '[redacted]';
+      if (instance.tls?.clientKeyFile) instance.tls.clientKeyFile = '[redacted]';
     }
   }
   return clone;

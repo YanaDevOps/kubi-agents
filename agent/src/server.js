@@ -45,6 +45,7 @@ import {
 } from './alerting.js';
 import { MCP_RESOURCE_CATALOG, mcpToolDefinitions } from '../../src/shared/mcp-catalog.js';
 import { loadLocalStorageDriverOverview } from './storage-drivers.js';
+import { loadLocalCiPipelines } from './ci/index.js';
 
 function json(response, status, payload, headers = {}) {
   response.writeHead(status, {
@@ -201,6 +202,7 @@ export function createAgentLoopbackServer(options) {
   const storageEventsProvider = options.storageEventsProvider || loadLocalStorageEvents;
   const componentsProvider = options.componentsProvider || loadLocalComponentInventory;
   const deliveryActivityProvider = options.deliveryActivityProvider || loadLocalDeliveryActivity;
+  const ciPipelinesProvider = options.ciPipelinesProvider || loadLocalCiPipelines;
   const deliveryEventsProvider = options.deliveryEventsProvider || loadLocalDeliveryEvents;
   const jobsProvider = options.jobsProvider || loadLocalJobs;
   const jobLogsProvider = options.jobLogsProvider || loadLocalJobLogs;
@@ -713,7 +715,12 @@ export function createAgentLoopbackServer(options) {
       if (url.pathname === '/v1/delivery-activity') {
         return {
           status: 200,
-          payload: await deliveryActivityProvider(runtimeConfig, url.searchParams.get('ns'), url.searchParams.get('provider')),
+          payload: await deliveryActivityProvider(
+            runtimeConfig,
+            url.searchParams.get('ns'),
+            url.searchParams.get('provider'),
+            url.searchParams.get('section')
+          ),
           headers: responseCorsHeaders
         };
       }
@@ -727,6 +734,18 @@ export function createAgentLoopbackServer(options) {
             namespace: url.searchParams.get('ns') || '',
             name: url.searchParams.get('name') || ''
           }),
+          headers: responseCorsHeaders
+        };
+      }
+
+      if (url.pathname === '/v1/ci-pipelines') {
+        return {
+          status: 200,
+          payload: await ciPipelinesProvider(
+            runtimeConfig,
+            url.searchParams.get('provider'),
+            url.searchParams.get('instance')
+          ),
           headers: responseCorsHeaders
         };
       }

@@ -1,58 +1,34 @@
 # KUBI Agent
 
-KUBI Agent is the customer-side runtime for [KUBI SaaS](https://kubi.live). Run it on a Kubernetes node or a gateway host that can already reach one or more Kubernetes APIs. The agent discovers local kubeconfigs and opens an outbound WSS connection to KUBI over port 443; no inbound port, browser-to-host tunnel, or public Kubernetes API is required.
+KUBI Agent is the customer-side runtime for [KUBI](https://kubi.live). Install it on a Kubernetes node or a gateway host that can already reach your cluster APIs. The agent discovers kubeconfigs, performs read-only runtime requests, and opens an outbound WSS connection to KUBI over port 443.
 
-Raw kubeconfigs, client certificates, exec credentials, and bearer tokens remain on the agent host.
+No inbound port, public Kubernetes API, browser tunnel, or separate WSS utility is required. Raw kubeconfigs, client certificates, exec credentials, provider tokens, and custom CA files remain on the agent host.
 
-Agent `v0.1.5` and newer monitor the hosted WebSocket with ping/pong probes and reconnect automatically when a SaaS rollout or network interruption leaves the previous relay connection stale.
-Agent `v0.1.6` and newer report the running binary version and build through runtime health after an in-place upgrade; re-pairing is not required.
-Agent `v0.1.7` and newer detect platform extensions from StatefulSets, CSI drivers, StorageClasses, workload images, and operator CRDs. This includes Vitastor, Grafana, Prometheus, and VictoriaMetrics evidence without storing Kubernetes credentials in SaaS.
-Agent `v0.1.8` and newer also detect CNI providers from Node metadata and can report best-effort PVC usage through the Kubernetes `nodes/proxy` read path. Core storage inventory remains available when that optional permission is absent.
-Agent `v0.1.9` and newer correctly treat the UI `all` scope as a cluster-wide list and resolve kubelet volume names through Pod specs when summaries omit `pvcRef`.
-Agent `v0.1.10` and newer validate kubelet PVC samples against declared volume capacity. Node-filesystem statistics incorrectly attributed to a local PVC are ignored instead of being shown as PVC usage, and active Pod mounts are reported alongside each claim.
-Agent `v0.1.11` and newer negotiate Pod and Job log responses with Kubernetes API servers that reject a `text/plain`-only Accept header.
-Agent `v0.1.12` and newer expose the latest container restart timestamp so KUBI can distinguish current health from restart history.
-
-Agent `v0.1.13` and newer also expose read-only Job and CronJob execution controls, including TTL, restart policy, active deadlines, completion mode, and Indexed Job failure limits. Older agents remain compatible, but these optional fields are omitted from KUBI drawers.
-Agent `v0.1.14` adds K3s ServiceLB, Vector, and VictoriaLogs detection and exposes read-only cert-manager Certificate, Order, and Challenge status for Domain Health.
-Agent `v0.1.15` adds provider-neutral backup discovery for Velero/OpenShift OADP, CSI VolumeSnapshots, Longhorn, Veeam Kasten K10, Trilio, Rancher Backup Operator, K3s/RKE2 etcd snapshots, and Portworx/Stork. It reads Kubernetes custom resources only; it does not call vendor APIs or read Secret values. CSI and etcd recovery points are reported as snapshots, not full backups.
-Agent `v0.1.16` adds read-only Gateway API validation for installed GatewayClass, Gateway, HTTPRoute, GRPCRoute, TLSRoute, TCPRoute, UDPRoute, and ReferenceGrant resources. It reports rejected parents, unresolved references, missing Service backends, stale status, and partial endpoint readiness without executing Kubernetes authorization probes.
-Agent `v0.1.17` consolidates endpoint readiness into one finding per Service and follows Kubernetes targetPort semantics. Numeric target ports do not require an explicit containerPort declaration; unresolved named target ports remain visible.
-Agent `v0.1.18` reports Secret usage through Pod and owning Workload metadata without reading Secret values. It also adds read-only storage driver metrics: Vitastor supports etcd v3 gateway auto-discovery or explicit host-side profiles, while other CSI providers keep generic Kubernetes inventory.
-Agent `v0.1.19` detects Loki, Tempo, OpenTelemetry Collector, Fluent Bit, and Fluentd from running workloads and operator CRDs. CRD-only installations are reported as configured rather than active, while canaries, operators, and unrelated labels are excluded from active detection.
-Agent `v0.1.20` bounds control-plane requests, coalesces overlapping heartbeat and discovery work, and makes relay startup and shutdown idempotent. It does not change the runtime API contract.
-Agent `v0.1.21` classifies unused Kubernetes-managed ConfigMaps separately from actionable application ConfigMaps. Standard system namespaces, `kube-root-ca.crt`, and the `kubernetes.io/description` marker are identified without exposing annotation contents; runtime API compatibility remains unchanged.
-Agent `v0.1.22` adds an optional Prometheus pull endpoint for customer-owned dashboards. It is disabled and loopback-only by default, collects every unambiguous discovered context unless restricted, and exports bounded agent state plus aggregate cluster health without per-resource labels.
-Agent `v0.1.23` adds CLI-first Vitastor metrics through bounded read-only `status`, `pools`, and `osds` JSON commands. Direct etcd remains a fallback, and KUBI reports usable pool capacity separately from raw OSD capacity.
-Agent `v0.1.24` restores per-monitor Vitastor inventory by enriching healthy CLI metrics with best-effort etcd monitor metadata without degrading OSD, pool, or capacity data when enrichment is unavailable.
-Agent `v0.1.25` adds an opt-in balanced Prometheus detail level with per-node, per-namespace, and per-workload metrics. The default aggregate mode is unchanged. The release also includes a Grafana dashboard, Prometheus alert rules, and local or authenticated remote scrape examples.
-Agent `v0.1.26` adds provider-neutral CSI health from CSINode, VolumeAttachment, CSIStorageCapacity, and positively matched CSI plugin Pods. It groups Ceph RBD/CephFS into one Rook/Ceph backend and adds read-only Rook/Ceph and Longhorn CRD/exporter adapters.
-Agent `v0.1.27` adds read-only OpenEBS and Portworx adapters. OpenEBS Mayastor, LVM LocalPV, and ZFS LocalPV are grouped into one provider; Portworx adds nodes, pools, volumes, I/O, and host connection health. Context-scoped bearer and mTLS exporter endpoints remain local to the agent host.
-Agent `v0.1.28` adds PV/PVC event reads, Vault security ecosystem detection, Argo CD multi-source applications, and more precise PVC usage diagnostics. Gateway API is reported as an ingress capability rather than a service mesh. Every deep storage adapter is now explicit opt-in; generic CSI inventory remains enabled.
-Agent `v0.1.30` fixes agent-backed Argo CD Delivery Activity, bounds provider-specific Kubernetes reads, and reports failed relay endpoints in the agent logs. Tokenless in-place upgrades and strict Gateway API evidence remain available from `v0.1.29`.
-Agent `v0.1.31` adds bounded Kubernetes-native Delivery Activity reads for Argo CD, Flux, Tekton, Argo Workflows, Argo Rollouts, and Flagger. Jenkins, GitLab Runner, Drone, Forgejo Actions, and GitHub Actions are detected from cluster workloads but remain detection-only until optional agent-side API integrations are available. Source credentials and Kubernetes Secret values are not returned.
-Agent `v0.1.32` aligns the local MCP capability catalog with the hosted KUBI MCP server and expands Argo CD normalization with AppProject consumers/configuration, all Application sources, structured sync policy, and sanitized repository references. Runtime API compatibility remains v2.
-Agent `v0.1.33` limits all-provider Delivery Activity reads to providers detected from installed CRDs, records delivery request status and latency in the local journal, and extends the hosted response deadline for slower Kubernetes APIs. Runtime API compatibility remains v2.
-
-## Install
+## Quick Start
 
 1. Sign in at [app.kubi.live](https://app.kubi.live).
-2. Open **KUBI APP → Connections → Agent**.
-3. Select the host platform and create a one-time pairing token.
-4. Run the generated installation command on the gateway host or cluster node.
-5. Add custom kubeconfig paths to `/etc/kubi-agent/agent.yaml`, restart the service, and select a discovered context in **Connections → Kubeconfigs**.
+2. Open **KUBI APP -> Connections -> Agent**.
+3. Create a one-time pairing token and run the generated install command on the target host.
+4. Add non-standard kubeconfig paths to `/etc/kubi-agent/agent.yaml`.
+5. Restart the service and select the discovered context in **Connections -> Kubeconfigs**.
 
-The pairing token expires after 30 minutes and can be used once. If it expires, create a new token; an expired token does not affect an already paired agent.
+```sh
+sudo systemctl restart kubi-agent
+sudo systemctl status kubi-agent
+journalctl -u kubi-agent -f
+```
 
-## Update
+The pairing token expires after 30 minutes and can be used once. It is needed only for the first installation or for replacing a revoked identity.
 
-When KUBI shows `update-recommended` or `update-required`, copy the **Update agent** command from the existing agent row and run it on the same host. The command uses `--upgrade`, contains no pairing token, preserves the identity and `/etc/kubi-agent/agent.yaml`, and restores the previous binary if the managed service cannot start.
+## Update Without Re-pairing
 
-Do not revoke an agent to update it. Revoke is a decommissioning action. If an identity was already revoked, use **Replace agent** on that row; after the replacement registers, KUBI transfers its existing connections to the new identity.
+When KUBI shows `update-recommended` or `update-required`, use **Update agent** on the existing agent row. The generated command uses `--upgrade`, preserves the paired identity and `/etc/kubi-agent/agent.yaml`, and restores the previous binary if the service cannot start.
 
-## Supported Artifacts
+Do not revoke an agent to update it. Revoke is a decommissioning action.
 
-| Platform | Artifact |
+## Supported Platforms
+
+| Platform | Release artifact |
 | --- | --- |
 | Linux x64 | `kubi-agent-linux-amd64` |
 | Linux ARM64 | `kubi-agent-linux-arm64` |
@@ -60,7 +36,86 @@ Do not revoke an agent to update it. Revoke is a decommissioning action. If an i
 | macOS Apple Silicon | `kubi-agent-darwin-arm64` |
 | Windows x64 | `kubi-agent-windows-amd64.exe` |
 
-Every release includes SHA-256 checksums, cosign signatures/certificates, `install.sh`, `install.ps1`, and `SHA256SUMS`.
+Each release includes checksums, cosign signatures and certificates, `install.sh`, and `install.ps1`. Release tags use `agent-vX.Y.Z`.
+
+## Configuration
+
+Linux installations use `/etc/kubi-agent/agent.yaml`. The paired identity is stored separately in `${XDG_CONFIG_HOME:-~/.config}/kubi-agent/config.json`; do not copy or edit that file manually.
+
+```yaml
+discovery:
+  kubeconfig_paths:
+    - /etc/rancher/k3s/k3s.yaml
+    - /srv/kubeconfigs/production.yaml
+
+logging:
+  level: info
+  outputs:
+    - stdout
+
+metrics_exporter:
+  enabled: false
+  listen_address: 127.0.0.1
+  port: 9464
+
+storage:
+  drivers:
+    vitastor:
+      enabled: false
+    ceph:
+      enabled: false
+    longhorn:
+      enabled: false
+    openebs:
+      enabled: false
+    portworx:
+      enabled: false
+
+ci:
+  enabled: false
+  github_actions:
+    enabled: false
+    instances: []
+  gitlab_ci:
+    enabled: false
+    instances: []
+  jenkins:
+    enabled: false
+    instances: []
+```
+
+All deep storage collectors and external CI integrations are opt-in. Restart the service after configuration changes.
+
+```sh
+kubi-agent config validate
+kubi-agent config show --effective
+```
+
+Effective configuration output redacts identity secrets, provider credentials, and protected credential paths.
+
+## CD & Pipelines
+
+KUBI reads Kubernetes-native delivery resources for Argo CD, Flux, Tekton, Argo Workflows, Argo Rollouts, and Flagger. Agent `v0.1.34+` can additionally read bounded run metadata from GitHub Actions, GitLab CI, and Jenkins.
+
+External provider credentials are read from protected files on the agent host. KUBI does not request CI logs, artifacts, variables, workspaces, credentials, or mutation permissions. See [CI pipelines](docs/ci-pipelines.md) for configuration and least-privilege examples.
+
+## Prometheus Metrics
+
+The optional metrics exporter is disabled and loopback-only by default. It exposes bounded agent and cluster health metrics for customer-owned Prometheus, VictoriaMetrics, or Grafana dashboards. It is separate from the local runtime API and cannot proxy arbitrary KUBI requests.
+
+See [Prometheus metrics](docs/prometheus-metrics.md) for secure remote scraping and the bundled dashboard.
+
+## Security Defaults
+
+- The hosted relay is outbound WSS over port 443.
+- Kubernetes and CI operations are read-only and bounded.
+- Raw kubeconfigs and provider credentials stay customer-side.
+- The loopback runtime listens on `127.0.0.1:47641`; do not expose it publicly.
+- Credential files must be regular files and must not be group- or world-readable on POSIX hosts.
+- Provider redirects are limited to the same origin; response size, request duration, and concurrency are bounded.
+- Logs, artifacts, CI variables, Kubernetes Secret values, and mutations are outside the runtime contract.
+
+See [Security model](docs/security.md) and [Kubernetes RBAC](docs/rbac.md).
 
 ## CLI
 
@@ -77,12 +132,21 @@ kubi-agent rotate
 
 - [Installation and flags](docs/installation.md)
 - [Configuration and gateway kubeconfigs](docs/configuration.md)
+- [Kubernetes RBAC](docs/rbac.md)
 - [Security model](docs/security.md)
 - [Troubleshooting](docs/troubleshooting.md)
 - [Prometheus metrics](docs/prometheus-metrics.md)
 - [Storage and CSI diagnostics](docs/storage.md)
-- [Delivery Activity providers](docs/delivery-activity.md)
+- [CD and Kubernetes-native delivery](docs/delivery-activity.md)
+- [External CI pipelines](docs/ci-pipelines.md)
 - [MCP inventory and safety boundary](docs/mcp.md)
-- [Bundled observability assets](observability/README.md)
 
-Release tags use `agent-vX.Y.Z`.
+## Development
+
+```sh
+npm install
+npm run check
+npm test
+```
+
+The source package is ESM and targets Node.js 22+. Never commit kubeconfigs, pairing identities, provider tokens, private keys, or generated credential files.

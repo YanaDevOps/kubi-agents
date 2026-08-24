@@ -1,4 +1,4 @@
-# Delivery Activity
+# CD and Kubernetes-native Delivery
 
 KUBI Agent reads delivery state from Kubernetes APIs through the selected kubeconfig. The hosted service receives normalized status and metadata, not repository credentials, Kubernetes Secret values, or raw kubeconfigs.
 
@@ -17,8 +17,8 @@ When the UI requests all providers, the agent first reads the bounded CRD invent
 
 Repository URLs are sanitized before they leave the agent. Helm value-file names and parameter names may be shown, but parameter values are never retained. The Kubernetes Application condition exposes an orphaned-resource count, not the exact Resource Tree. KUBI therefore reports that count honestly; exact orphan object names require a future opt-in Argo CD Resource Tree API integration.
 
-## Detection-only providers
+## External CI providers
 
-Jenkins, GitLab Runner, Drone, Forgejo Actions, and GitHub Actions Runner installations can be detected from workloads. Their pipeline histories live outside Kubernetes, so KUBI does not claim full coverage and does not request API tokens in this release.
+Jenkins, GitLab Runner, Drone, Forgejo Actions, and GitHub Actions Runner installations can be detected from workloads. Agent `v0.1.34+` optionally reads bounded run metadata from GitHub Actions, GitLab CI, and Jenkins through customer-side API adapters.
 
-Future external API integrations will keep credentials in the local agent configuration and expose only normalized read-only results through the relay.
+Credentials remain in protected files on the agent host. Provider logs, artifacts, variables, workspaces, credentials, and mutations are excluded. See [External CI pipelines](ci-pipelines.md).

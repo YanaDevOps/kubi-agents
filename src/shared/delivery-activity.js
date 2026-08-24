@@ -48,6 +48,20 @@ export const DELIVERY_RESOURCE_DEFINITIONS = [
   definition('flagger', 'project', 'flagger-config', 'flagger.app', ['v1beta1'], 'alertproviders', 'AlertProvider')
 ];
 
+export function deliveryDefinitionsForSection(definitions, section = null) {
+  if (!section || section === 'all') return definitions;
+  if (section === 'overview') {
+    return definitions.filter((definition) => definition.category === 'deployment' || definition.category === 'pipeline');
+  }
+  if (section === 'deployments') return definitions.filter((definition) => definition.category === 'deployment');
+  if (section === 'pipelines') return definitions.filter((definition) => definition.category === 'pipeline');
+  if (section === 'configuration') {
+    return definitions.filter((definition) => definition.category === 'project' || definition.category === 'source');
+  }
+  if (section === 'components') return [];
+  return definitions;
+}
+
 export const DELIVERY_PROVIDER_MARKERS = {
   argocd: 'applications.argoproj.io',
   flux: 'kustomizations.kustomize.toolkit.fluxcd.io',
@@ -630,7 +644,8 @@ function promoteApplicationSources(deployments) {
 }
 
 function controllerProvider(pod) {
-  const value = `${pod.namespace || ''}/${pod.name || ''}`;
+  const podMetadata = metadata(pod);
+  const value = `${pod.namespace || podMetadata.namespace || ''}/${pod.name || podMetadata.name || ''}`;
   if (/argocd-|\/argocd\//i.test(value)) return 'argocd';
   if (/flux-system|source-controller|kustomize-controller|helm-controller/i.test(value)) return 'flux';
   if (/tekton-pipelines|tekton-pipeline-controller|tekton-events-controller/i.test(value)) return 'tekton';
@@ -638,6 +653,20 @@ function controllerProvider(pod) {
   if (/argo-rollouts/i.test(value)) return 'argo-rollouts';
   if (/flagger/i.test(value)) return 'flagger';
   return EXTERNAL_PROVIDERS.find((provider) => provider.pattern.test(value))?.providerId || null;
+}
+
+export function deliveryProviderIdsFromSignals({ pods = [], crds = [] } = {}) {
+  const detected = new Set();
+  for (const crd of records(crds)) {
+    const name = metadata(crd).name;
+    const providerId = DELIVERY_PROVIDER_IDS.find((candidate) => DELIVERY_PROVIDER_MARKERS[candidate] === name);
+    if (providerId) detected.add(providerId);
+  }
+  for (const pod of records(pods)) {
+    const providerId = controllerProvider(pod);
+    if (DELIVERY_PROVIDER_IDS.includes(providerId)) detected.add(providerId);
+  }
+  return DELIVERY_PROVIDER_IDS.filter((providerId) => detected.has(providerId));
 }
 
 function availability(issues, partial) {

@@ -2,12 +2,13 @@
 
 KUBI exposes the selected agent-backed connection through the Premium hosted MCP endpoint at `https://app.kubi.live/api/mcp`. The customer host does not need an inbound listener: MCP inventory reads travel over the agent's existing authenticated outbound WebSocket relay.
 
-The agent and SaaS share one fixed resource catalog. It covers cluster inventory, networking, storage and backup summaries, platform components, delivery activity, validation, RBAC, metrics, CRD metadata, and Secret metadata.
+The agent and SaaS share one fixed resource catalog. It covers cluster inventory, networking, storage and backup summaries, platform components, Kubernetes-native delivery activity, external CI pipeline summaries, validation, RBAC, metrics, CRD metadata, and Secret metadata.
 
 The MCP surface intentionally excludes:
 
 - Kubernetes mutations;
 - Pod and Job logs;
+- CI logs, artifacts, variables, workspaces, and credentials;
 - Kubernetes Events;
 - arbitrary custom-resource objects;
 - alerting configuration and channel credentials;

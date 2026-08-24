@@ -62,6 +62,12 @@ discovery:
           },
           profiles: []
         }
+      },
+      ci: {
+        enabled: false,
+        githubActions: { enabled: false, instances: [] },
+        gitlabCi: { enabled: false, instances: [] },
+        jenkins: { enabled: false, instances: [] }
       }
     });
     expect(resolveAgentRuntimeConfig({ controlPlaneUrl: 'https://old.invalid', agentId: 'a', agentSecret: 's' })).toMatchObject({
@@ -111,6 +117,63 @@ discovery:
     expect(() => validateAgentSettings({
       metrics_exporter: { detail_level: 'per-pod' }
     })).toThrow('metrics_exporter.detail_level must be aggregate or balanced');
+  });
+
+  test('normalizes local-only CI credentials and rejects implicit plaintext provider URLs', () => {
+    const validated = validateAgentSettings({
+      ci: {
+        enabled: true,
+        github_actions: {
+          instances: [{
+            id: 'github-prod',
+            base_url: 'https://api.github.com',
+            repositories: [{ owner: 'acme', name: 'api' }],
+            auth: { token_file: '/etc/kubi-agent/ci/github.token' }
+          }]
+        },
+        gitlab_ci: {
+          instances: [{
+            id: 'gitlab-prod',
+            base_url: 'https://gitlab.example.com',
+            projects: ['platform/api'],
+            auth: { token_file: '/etc/kubi-agent/ci/gitlab.token' }
+          }]
+        },
+        jenkins: {
+          instances: [{
+            id: 'jenkins-prod',
+            base_url: 'https://jenkins.example.com/jenkins',
+            allowed_job_roots: ['platform'],
+            auth: {
+              username_file: '/etc/kubi-agent/ci/jenkins.username',
+              api_token_file: '/etc/kubi-agent/ci/jenkins.token'
+            }
+          }]
+        }
+      }
+    });
+    expect(validated.ci.githubActions.instances[0]).toMatchObject({
+      id: 'github-prod',
+      maxPages: 2,
+      maxRuns: 100,
+      repositories: [{ owner: 'acme', name: 'api' }]
+    });
+    expect(validated.ci.jenkins.instances[0]).toMatchObject({ maxDepth: 4, maxJobs: 100 });
+    const redacted = redactAgentRuntimeConfig({ agentSecret: 'secret', ci: validated.ci });
+    expect(redacted.ci.githubActions.instances[0].auth.tokenFile).toBe('[redacted]');
+    expect(redacted.ci.jenkins.instances[0].auth.apiTokenFile).toBe('[redacted]');
+    expect(() => validateAgentSettings({
+      ci: {
+        gitlab_ci: {
+          instances: [{
+            id: 'unsafe',
+            base_url: 'http://gitlab.internal',
+            projects: ['platform/api'],
+            auth: { token_file: '/etc/kubi-agent/ci/gitlab.token' }
+          }]
+        }
+      }
+    })).toThrow('allow_insecure_http must be true');
   });
 
   test('uses the running binary release instead of stale pairing metadata', () => {
