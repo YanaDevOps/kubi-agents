@@ -136,7 +136,9 @@ async function runAgent() {
     capabilities: DEFAULT_CAPABILITIES,
     onStatus(status) {
       metricsState.relayConnected = status === 'connected';
-      logger.info(status === 'connected' ? 'KUBI hosted relay connected.' : 'KUBI hosted relay disconnected; reconnecting.');
+      if (status === 'connected') logger.info('KUBI hosted relay connected.');
+      else if (status === 'authentication-failed') logger.warn('KUBI hosted relay authentication is terminal until the agent identity is repaired and the service is restarted.');
+      else logger.info('KUBI hosted relay disconnected; reconnecting.');
     },
     onError(error) {
       metricsState.errors.relay += 1;

@@ -155,10 +155,19 @@ export function createAgentRelayClient(options) {
     activeSocket.on('pong', () => {
       if (socket === activeSocket) awaitingPong = false;
     });
-    activeSocket.on('close', () => {
+    activeSocket.on('close', (code, reason) => {
       if (socket !== activeSocket) return;
       clearSocketTimers();
       socket = null;
+      if (code === 4401 || code === 4403) {
+        const detail = reason?.toString?.().trim();
+        const message = code === 4403
+          ? 'The hosted relay rejected this revoked agent. Pair a replacement agent before restarting the service.'
+          : 'The hosted relay rejected this agent identity. Re-pair the agent or restore its matching identity file, then restart the service.';
+        options.onStatus?.('authentication-failed');
+        options.onError?.(new Error(detail ? `${message} Server response: ${detail}` : message));
+        return;
+      }
       options.onStatus?.('disconnected');
       scheduleReconnect();
     });

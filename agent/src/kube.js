@@ -17,6 +17,7 @@ import { classifySystemConfigMap } from '../../src/shared/system-configmap.js';
 import {
   collectResourceReferences,
   podRelatedResources,
+  referenceProviderResourceDescriptors,
   referencedResourceKeys
 } from '../../src/shared/resource-references.js';
 import {
@@ -1927,7 +1928,13 @@ export async function loadLocalPodRelatedResources(runtimeConfig, input) {
     return {
       namespace,
       pod: name,
-      items: podRelatedResources({ pod, configMaps, secrets }),
+      items: podRelatedResources({
+        pod,
+        configMaps,
+        secrets,
+        configMapsComplete: resources[0].status === 'fulfilled' && !resources[0].value.truncated,
+        secretsComplete: resources[1].status === 'fulfilled' && !resources[1].value.truncated
+      }),
       partial: resources.some((entry) => entry.status === 'rejected') ||
         (resources[0].status === 'fulfilled' && resources[0].value.truncated) ||
         (resources[1].status === 'fulfilled' && resources[1].value.truncated)
@@ -2852,14 +2859,15 @@ function isRuntimeSystemNamespace(namespace) {
   return namespace === 'kube-system' || namespace === 'kube-public' || namespace === 'kube-node-lease';
 }
 
-export function buildRuntimeGhostResources(services, endpointSlices, ingresses, pvcs, pods, configMaps, secrets, serviceAccounts, replicaSets, fetchedAt, namespaceScope, issues = [], partial = false, workloads = [], referenceCoverage = {}) {
+export function buildRuntimeGhostResources(services, endpointSlices, ingresses, pvcs, pods, configMaps, secrets, serviceAccounts, replicaSets, fetchedAt, namespaceScope, issues = [], partial = false, workloads = [], referenceCoverage = {}, referenceSources = {}) {
   const ghostIssues = [];
   const runtimeIssues = [...issues];
   const configMapUsageComplete = referenceCoverage.configMaps !== false;
   const secretUsageComplete = referenceCoverage.secrets !== false;
-  const effectivePartial = partial || !configMapUsageComplete || !secretUsageComplete;
-  if (!configMapUsageComplete || !secretUsageComplete) {
-    runtimeIssues.push(partialIssue('ghost-resources', 'Secret or ConfigMap usage could not be verified completely. Unused-resource findings were withheld.'));
+  const serviceAccountUsageComplete = referenceCoverage.serviceAccounts !== false;
+  const effectivePartial = partial || !configMapUsageComplete || !secretUsageComplete || !serviceAccountUsageComplete;
+  if (!configMapUsageComplete || !secretUsageComplete || !serviceAccountUsageComplete) {
+    runtimeIssues.push(partialIssue('ghost-resources', 'Secret, ConfigMap, or ServiceAccount usage could not be verified completely. Unused-resource findings were withheld.'));
   }
   const serviceRecords = asRecordArray(services);
   const serviceKeys = new Set(serviceRecords.map((service) => referenceKey(metadataFor(service).namespace, metadataFor(service).name)));
@@ -2871,7 +2879,10 @@ export function buildRuntimeGhostResources(services, endpointSlices, ingresses, 
     secrets: asRecordArray(secrets),
     serviceAccounts: asRecordArray(serviceAccounts),
     ingresses: asRecordArray(ingresses),
-    workloads: asRecordArray(workloads)
+    workloads: asRecordArray(workloads),
+    roleBindings: asRecordArray(referenceSources.roleBindings),
+    clusterRoleBindings: asRecordArray(referenceSources.clusterRoleBindings),
+    providerResources: asRecordArray(referenceSources.providerResources)
   }));
   for (const service of serviceRecords) {
     const meta = metadataFor(service);
@@ -2900,20 +2911,20 @@ export function buildRuntimeGhostResources(services, endpointSlices, ingresses, 
   for (const configMap of configMapUsageComplete ? asRecordArray(configMaps) : []) {
     const meta = metadataFor(configMap);
     if (!referencedResources.has(`configmap:${referenceKey(meta.namespace, meta.name)}`)) {
-      pushRuntimeGhostIssue(ghostIssues, { category: 'unused-configmaps', severity: 'info', resourceKind: 'ConfigMap', resourceName: meta.name, namespace: meta.namespace, reason: 'No reference was found in Pods, workload templates, ServiceAccounts, Ingress TLS, or exact container arguments.', ...classifySystemConfigMap(configMap), related: [{ kind: 'ConfigMap', name: meta.name, namespace: meta.namespace }], suggestedActions: ['Check application configuration history before cleanup.'] });
+      pushRuntimeGhostIssue(ghostIssues, { category: 'unused-configmaps', severity: 'info', resourceKind: 'ConfigMap', resourceName: meta.name, namespace: meta.namespace, reason: 'No reference was found in workloads, controllers, RBAC, TLS configuration, or exact container arguments.', ...classifySystemConfigMap(configMap), related: [{ kind: 'ConfigMap', name: meta.name, namespace: meta.namespace }], suggestedActions: ['Check application configuration history before cleanup.'] });
     }
   }
   for (const secret of secretUsageComplete ? asRecordArray(secrets) : []) {
     const meta = metadataFor(secret);
     const type = stringOrUndefined(secret.type) || 'Opaque';
     if (!isRuntimeSystemNamespace(meta.namespace) && type !== 'kubernetes.io/service-account-token' && !meta.name.startsWith('sh.helm.release.v1.') && !referencedResources.has(`secret:${referenceKey(meta.namespace, meta.name)}`)) {
-      pushRuntimeGhostIssue(ghostIssues, { category: 'unused-secrets', severity: 'info', resourceKind: 'Secret', resourceName: meta.name, namespace: meta.namespace, reason: 'No reference was found in Pods, workload templates, ServiceAccounts, Ingress TLS, or exact container arguments.', related: [{ kind: 'Secret', name: meta.name, namespace: meta.namespace }], suggestedActions: ['Verify no external controller consumes this Secret before cleanup.'] });
+      pushRuntimeGhostIssue(ghostIssues, { category: 'unused-secrets', severity: 'info', resourceKind: 'Secret', resourceName: meta.name, namespace: meta.namespace, reason: 'No reference was found in workloads, controllers, RBAC, TLS configuration, or exact container arguments.', related: [{ kind: 'Secret', name: meta.name, namespace: meta.namespace }], suggestedActions: ['Verify no external controller consumes this Secret before cleanup.'] });
     }
   }
-  for (const serviceAccount of asRecordArray(serviceAccounts)) {
+  for (const serviceAccount of serviceAccountUsageComplete ? asRecordArray(serviceAccounts) : []) {
     const meta = metadataFor(serviceAccount);
-    if (!isRuntimeSystemNamespace(meta.namespace) && meta.name !== 'default' && !podRefs.serviceAccounts.has(referenceKey(meta.namespace, meta.name))) {
-      pushRuntimeGhostIssue(ghostIssues, { category: 'unused-serviceaccounts', severity: 'info', resourceKind: 'ServiceAccount', resourceName: meta.name, namespace: meta.namespace, reason: 'ServiceAccount is not used by any runtime-visible pod.', related: [{ kind: 'ServiceAccount', name: meta.name, namespace: meta.namespace }], suggestedActions: ['Check RBAC bindings before removing the ServiceAccount.'] });
+    if (!isRuntimeSystemNamespace(meta.namespace) && meta.name !== 'default' && !referencedResources.has(`serviceaccount:${referenceKey(meta.namespace, meta.name)}`)) {
+      pushRuntimeGhostIssue(ghostIssues, { category: 'unused-serviceaccounts', severity: 'info', resourceKind: 'ServiceAccount', resourceName: meta.name, namespace: meta.namespace, reason: 'No reference was found in Pods, workload templates, RBAC bindings, Vault authentication, or controller lifecycle resources.', related: [{ kind: 'ServiceAccount', name: meta.name, namespace: meta.namespace }], suggestedActions: ['Check external TokenRequest consumers before removing the ServiceAccount.'] });
     }
   }
   for (const replicaSet of asRecordArray(replicaSets)) {
@@ -2953,6 +2964,21 @@ export function buildRuntimeGhostResources(services, endpointSlices, ingresses, 
   };
 }
 
+async function loadLocalProviderReferenceResources(kubeConfig, customResourceDefinitions, namespaceScope) {
+  const descriptors = referenceProviderResourceDescriptors(customResourceDefinitions);
+  const requests = await Promise.allSettled(descriptors.map((descriptor) => {
+    const root = `/apis/${descriptor.group}/${descriptor.version}`;
+    const path = descriptor.namespaced
+      ? namespacePath(`${root}/${descriptor.plural}`, `${root}/namespaces/:namespace/${descriptor.plural}`, namespaceScope)
+      : `${root}/${descriptor.plural}`;
+    return fetchKubeList(kubeConfig, path, true);
+  }));
+  return {
+    items: requests.flatMap((result) => result.status === 'fulfilled' ? result.value.items : []),
+    partial: requests.some((result) => result.status === 'rejected' || (result.status === 'fulfilled' && (result.value.truncated || result.value.missing)))
+  };
+}
+
 export async function loadLocalGhostResources(runtimeConfig, namespaceScope = null) {
   try {
     const kubeConfig = loadLocalKubeConfig(runtimeConfig);
@@ -2971,7 +2997,10 @@ export async function loadLocalGhostResources(runtimeConfig, namespaceScope = nu
       fetchKubeList(kubeConfig, namespacePath('/apis/apps/v1/statefulsets', '/apis/apps/v1/namespaces/:namespace/statefulsets', effectiveNamespace)),
       fetchKubeList(kubeConfig, namespacePath('/apis/apps/v1/daemonsets', '/apis/apps/v1/namespaces/:namespace/daemonsets', effectiveNamespace)),
       fetchKubeList(kubeConfig, namespacePath('/apis/batch/v1/jobs', '/apis/batch/v1/namespaces/:namespace/jobs', effectiveNamespace)),
-      fetchKubeList(kubeConfig, namespacePath('/apis/batch/v1/cronjobs', '/apis/batch/v1/namespaces/:namespace/cronjobs', effectiveNamespace))
+      fetchKubeList(kubeConfig, namespacePath('/apis/batch/v1/cronjobs', '/apis/batch/v1/namespaces/:namespace/cronjobs', effectiveNamespace)),
+      fetchKubeList(kubeConfig, '/apis/apiextensions.k8s.io/v1/customresourcedefinitions'),
+      fetchKubeList(kubeConfig, namespacePath('/apis/rbac.authorization.k8s.io/v1/rolebindings', '/apis/rbac.authorization.k8s.io/v1/namespaces/:namespace/rolebindings', effectiveNamespace)),
+      fetchKubeList(kubeConfig, '/apis/rbac.authorization.k8s.io/v1/clusterrolebindings')
     ]);
     if (requests.every((entry) => entry.status === 'rejected')) throw requests[0].reason;
     const issues = [];
@@ -2989,16 +3018,24 @@ export async function loadLocalGhostResources(runtimeConfig, namespaceScope = nu
     const daemonSets = settledSection(requests[11], 'ghost-resources', 'DaemonSets could not be checked for resource references.', 'The DaemonSet list was truncated for ghost-resource checks.', issues);
     const jobs = settledSection(requests[12], 'ghost-resources', 'Jobs could not be checked for resource references.', 'The Job list was truncated for ghost-resource checks.', issues);
     const cronJobs = settledSection(requests[13], 'ghost-resources', 'CronJobs could not be checked for resource references.', 'The CronJob list was truncated for ghost-resource checks.', issues);
+    const customResourceDefinitions = settledSection(requests[14], 'ghost-resources', 'CRDs could not be loaded for controller reference discovery.', 'The CRD list was truncated for controller reference discovery.', issues);
+    const roleBindings = settledSection(requests[15], 'ghost-resources', 'RoleBindings could not be checked for ServiceAccount references.', 'The RoleBinding list was truncated for ghost-resource checks.', issues);
+    const clusterRoleBindings = settledSection(requests[16], 'ghost-resources', 'ClusterRoleBindings could not be checked for ServiceAccount references.', 'The ClusterRoleBinding list was truncated for ghost-resource checks.', issues);
+    const providerResources = customResourceDefinitions.partial
+      ? { items: [], partial: true }
+      : await loadLocalProviderReferenceResources(kubeConfig, customResourceDefinitions.items, effectiveNamespace);
     const workloads = [...deployments.items, ...statefulSets.items, ...daemonSets.items, ...replicaSets.items, ...jobs.items, ...cronJobs.items];
-    const partial = services.partial || endpointSlices.partial || ingresses.partial || pvcs.partial || pods.partial || configMaps.partial || secrets.partial || serviceAccounts.partial || replicaSets.partial || deployments.partial || statefulSets.partial || daemonSets.partial || jobs.partial || cronJobs.partial;
+    const partial = services.partial || endpointSlices.partial || ingresses.partial || pvcs.partial || pods.partial || configMaps.partial || secrets.partial || serviceAccounts.partial || replicaSets.partial || deployments.partial || statefulSets.partial || daemonSets.partial || jobs.partial || cronJobs.partial || customResourceDefinitions.partial || roleBindings.partial || clusterRoleBindings.partial || providerResources.partial;
     const workloadReferencesComplete = !deployments.partial && !statefulSets.partial && !daemonSets.partial && !replicaSets.partial && !jobs.partial && !cronJobs.partial;
     return buildRuntimeGhostResources(
       services.items, endpointSlices.items, ingresses.items, pvcs.items, pods.items, configMaps.items, secrets.items,
       serviceAccounts.items, replicaSets.items, new Date().toISOString(), effectiveNamespace, issues, partial, workloads,
       {
-        configMaps: !configMaps.partial && !pods.partial && workloadReferencesComplete,
-        secrets: !configMaps.partial && !secrets.partial && !pods.partial && !serviceAccounts.partial && !ingresses.partial && workloadReferencesComplete
-      }
+        configMaps: !configMaps.partial && !pods.partial && workloadReferencesComplete && !providerResources.partial,
+        secrets: !configMaps.partial && !secrets.partial && !pods.partial && !serviceAccounts.partial && !ingresses.partial && workloadReferencesComplete && !providerResources.partial,
+        serviceAccounts: !serviceAccounts.partial && !pods.partial && workloadReferencesComplete && !roleBindings.partial && !clusterRoleBindings.partial && !providerResources.partial
+      },
+      { roleBindings: roleBindings.items, clusterRoleBindings: clusterRoleBindings.items, providerResources: providerResources.items }
     );
   } catch (error) {
     throw new Error(sanitizeKubeError(error));

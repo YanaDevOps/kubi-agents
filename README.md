@@ -109,7 +109,7 @@ See [Prometheus metrics](docs/prometheus-metrics.md) for secure remote scraping 
 
 - The hosted relay is outbound WSS over port 443.
 - Kubernetes and CI operations are read-only and bounded.
-- Secret and ConfigMap cleanup findings are emitted only when the agent can verify all supported Pod and workload references; incomplete RBAC coverage is reported instead of producing false orphan findings.
+- Secret, ConfigMap, and ServiceAccount cleanup findings are emitted only when the agent can verify workload, RBAC, and installed-controller references. Vault Secrets Operator, cert-manager, Velero, Argo CD, Traefik, and Gateway API references are recognized; incomplete coverage is reported instead of producing false orphan findings.
 - Raw kubeconfigs and provider credentials stay customer-side.
 - The loopback runtime listens on `127.0.0.1:47641`; do not expose it publicly.
 - Credential files must be regular files and must not be group- or world-readable on POSIX hosts.
@@ -151,3 +151,5 @@ npm test
 ```
 
 The source package is ESM and targets Node.js 22+. Never commit kubeconfigs, pairing identities, provider tokens, private keys, or generated credential files.
+
+Agent `v0.1.38` adds controller-aware Ghost Resource analysis, validates optional Pod resource targets before the SaaS links them, and stops reconnecting after a terminal revoked or invalid identity response. Runtime API compatibility remains v2.

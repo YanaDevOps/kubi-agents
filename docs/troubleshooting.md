@@ -14,6 +14,8 @@ curl -I https://app.kubi.live
 
 Confirm outbound HTTPS/WSS on port 443 is allowed. The log should report `KUBI hosted relay connected.`
 
+If `v0.1.38+` reports a terminal relay authentication failure, repeated reconnects are intentionally stopped. The saved identity was revoked or no longer matches the control plane. Use **Replace agent** for a revoked agent, or re-pair after confirming that the identity file belongs to this installation, then restart the service.
+
 ## No Kubeconfigs
 
 Edit `/etc/kubi-agent/agent.yaml`, add the real files under `discovery.kubeconfig_paths`, run `kubi-agent config validate`, and restart the service. Confirm the service account can read every referenced kubeconfig, CA, client certificate, and key.

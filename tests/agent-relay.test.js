@@ -110,9 +110,65 @@ describe('hosted relay client', () => {
 
     try {
       relay.start();
-      await wait(35);
+      await wait(60);
       expect(sockets.length).toBeGreaterThanOrEqual(2);
       expect(sockets[0].terminated).toBe(true);
+    } finally {
+      relay.close();
+    }
+  });
+
+  test('does not reconnect after terminal identity rejection', async () => {
+    let socketCount = 0;
+    const statuses = [];
+    const errors = [];
+    const relay = createAgentRelayClient({
+      runtimeConfig: { controlPlaneUrl: 'https://app.kubi.live', agentId: 'agent-1', agentSecret: 'stale-secret' },
+      platform: 'linux/x64',
+      version: '0.1.38',
+      capabilities: { runtimeApiVersion: '2' },
+      reconnectBaseDelayMs: 1,
+      reconnectMaxDelayMs: 2,
+      reconnectJitterMs: 0,
+      webSocketFactory: () => {
+        socketCount += 1;
+        const socket = Object.assign(new EventEmitter(), {
+          readyState: 1,
+          send(raw) {
+            if (JSON.parse(raw).type === 'hello') {
+              queueMicrotask(() => {
+                socket.readyState = 3;
+                socket.emit('close', 4401, Buffer.from('Agent identity is invalid.'));
+              });
+            }
+          },
+          ping() {},
+          terminate() {},
+          close() {
+            socket.readyState = 3;
+            socket.emit('close', 1000, Buffer.alloc(0));
+          }
+        });
+        queueMicrotask(() => socket.emit('open'));
+        return socket;
+      },
+      async dispatch() {
+        return { status: 200, payload: {}, headers: {} };
+      },
+      onStatus(status) {
+        statuses.push(status);
+      },
+      onError(error) {
+        errors.push(error.message);
+      }
+    });
+
+    try {
+      relay.start();
+      await wait(20);
+      expect(socketCount).toBe(1);
+      expect(statuses).toContain('authentication-failed');
+      expect(errors[0]).toContain('Re-pair the agent');
     } finally {
       relay.close();
     }

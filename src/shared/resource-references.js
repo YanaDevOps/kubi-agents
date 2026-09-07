@@ -16,6 +16,10 @@ function text(value) {
   return typeof value === 'string' && value.trim() ? value.trim() : '';
 }
 
+function referencedName(value) {
+  return text(value) || text(record(value).name);
+}
+
 function metadata(resource) {
   const meta = record(resource?.metadata);
   return {
@@ -38,6 +42,7 @@ function addReference(target, seen, input) {
     consumerName: input.consumerName,
     method: input.method,
     confidence: input.confidence || 'exact',
+    ...(typeof input.optional === 'boolean' ? { optional: input.optional } : {}),
     ...(input.container ? { container: input.container } : {}),
     ...(input.variable ? { variable: input.variable } : {}),
     ...(input.key ? { key: input.key } : {}),
@@ -90,6 +95,16 @@ function collectSpecReferences(target, seen, specInput, consumer, known) {
     consumerName: consumer.name
   };
 
+  const serviceAccountName = text(spec.serviceAccountName || spec.serviceAccount);
+  if (serviceAccountName) {
+    addReference(target, seen, {
+      ...base,
+      resourceKind: 'ServiceAccount',
+      resourceName: serviceAccountName,
+      method: 'workloadServiceAccount'
+    });
+  }
+
   for (const pullSecret of records(spec.imagePullSecrets)) {
     addReference(target, seen, {
       ...base,
@@ -109,7 +124,8 @@ function collectSpecReferences(target, seen, specInput, consumer, known) {
       resourceKind: 'ConfigMap',
       resourceName: text(configMap.name),
       method: 'volume',
-      volume: volumeName
+      volume: volumeName,
+      optional: configMap.optional === true
     });
     const typedSecretSources = [
       record(volume.csi).nodePublishSecretRef,
@@ -141,7 +157,8 @@ function collectSpecReferences(target, seen, specInput, consumer, known) {
       resourceKind: 'Secret',
       resourceName: text(secret.secretName),
       method: 'volume',
-      volume: volumeName
+      volume: volumeName,
+      optional: secret.optional === true
     });
     for (const sourceEntry of records(record(volume.projected).sources)) {
       const source = record(sourceEntry);
@@ -150,14 +167,16 @@ function collectSpecReferences(target, seen, specInput, consumer, known) {
         resourceKind: 'ConfigMap',
         resourceName: text(record(source.configMap).name),
         method: 'projectedVolume',
-        volume: volumeName
+        volume: volumeName,
+        optional: record(source.configMap).optional === true
       });
       addReference(target, seen, {
         ...base,
         resourceKind: 'Secret',
         resourceName: text(record(source.secret).name),
         method: 'projectedVolume',
-        volume: volumeName
+        volume: volumeName,
+        optional: record(source.secret).optional === true
       });
     }
   }
@@ -182,7 +201,8 @@ function collectSpecReferences(target, seen, specInput, consumer, known) {
         method: 'env',
         container: containerName,
         variable: text(env.name),
-        key: text(configMap.key)
+        key: text(configMap.key),
+        optional: configMap.optional === true
       });
       addReference(target, seen, {
         ...base,
@@ -191,7 +211,8 @@ function collectSpecReferences(target, seen, specInput, consumer, known) {
         method: 'env',
         container: containerName,
         variable: text(env.name),
-        key: text(secret.key)
+        key: text(secret.key),
+        optional: secret.optional === true
       });
     }
     for (const envFromEntry of records(container.envFrom)) {
@@ -202,7 +223,8 @@ function collectSpecReferences(target, seen, specInput, consumer, known) {
         resourceName: text(record(envFrom.configMapRef).name),
         method: 'envFrom',
         container: containerName,
-        prefix: text(envFrom.prefix)
+        prefix: text(envFrom.prefix),
+        optional: record(envFrom.configMapRef).optional === true
       });
       addReference(target, seen, {
         ...base,
@@ -210,7 +232,8 @@ function collectSpecReferences(target, seen, specInput, consumer, known) {
         resourceName: text(record(envFrom.secretRef).name),
         method: 'envFrom',
         container: containerName,
-        prefix: text(envFrom.prefix)
+        prefix: text(envFrom.prefix),
+        optional: record(envFrom.secretRef).optional === true
       });
     }
     const candidates = [
@@ -239,6 +262,206 @@ function workloadSpec(resource) {
   const cronJobPodSpec = record(record(jobTemplateSpec.template).spec);
   if (Object.keys(cronJobPodSpec).length > 0) return cronJobPodSpec;
   return record(record(spec.template).spec);
+}
+
+const REFERENCE_PROVIDER_CRDS = new Set([
+  'vaultauths.secrets.hashicorp.com',
+  'vaultauthglobals.secrets.hashicorp.com',
+  'vaultconnections.secrets.hashicorp.com',
+  'vaultstaticsecrets.secrets.hashicorp.com',
+  'vaultdynamicsecrets.secrets.hashicorp.com',
+  'vaultpkisecrets.secrets.hashicorp.com',
+  'certificates.cert-manager.io',
+  'issuers.cert-manager.io',
+  'clusterissuers.cert-manager.io',
+  'backupstoragelocations.velero.io',
+  'volumesnapshotlocations.velero.io',
+  'ingressroutes.traefik.io',
+  'middlewares.traefik.io',
+  'tlsstores.traefik.io',
+  'ingressroutes.traefik.containo.us',
+  'middlewares.traefik.containo.us',
+  'tlsstores.traefik.containo.us',
+  'gateways.gateway.networking.k8s.io'
+]);
+
+export function referenceProviderResourceDescriptors(customResourceDefinitions) {
+  return records(customResourceDefinitions).flatMap((crd) => {
+    const meta = metadata(crd);
+    if (!REFERENCE_PROVIDER_CRDS.has(meta.name)) return [];
+    const spec = record(crd.spec);
+    const names = record(spec.names);
+    const versions = records(spec.versions);
+    const selectedVersion = versions.find((item) => item.storage === true && item.served !== false)
+      || versions.find((item) => item.served !== false);
+    const version = text(selectedVersion?.name) || text(spec.version);
+    const group = text(spec.group);
+    const plural = text(names.plural);
+    if (!group || !version || !plural) return [];
+    return [{
+      name: meta.name,
+      group,
+      version,
+      plural,
+      namespaced: text(spec.scope) !== 'Cluster'
+    }];
+  });
+}
+
+function clusterResourceNamespace(workloads) {
+  for (const workload of records(workloads)) {
+    for (const container of records(workloadSpec(workload).containers)) {
+      for (const candidate of argumentCandidates([...strings(container.command), ...strings(container.args)])) {
+        if (candidate.flag === '--cluster-resource-namespace' && candidate.value) return candidate.value;
+      }
+    }
+  }
+  return 'cert-manager';
+}
+
+function addControllerReference(target, seen, resource, input) {
+  const meta = metadata(resource);
+  addReference(target, seen, {
+    namespace: input.namespace || meta.namespace,
+    consumerKind: text(resource.kind) || input.consumerKind || 'ControllerResource',
+    consumerName: meta.name,
+    confidence: 'exact',
+    ...input
+  });
+}
+
+function collectBindingReferences(target, seen, bindings) {
+  for (const binding of records(bindings)) {
+    const meta = metadata(binding);
+    for (const subject of records(binding.subjects)) {
+      if (text(subject.kind) !== 'ServiceAccount') continue;
+      addReference(target, seen, {
+        resourceKind: 'ServiceAccount',
+        resourceName: text(subject.name),
+        namespace: text(subject.namespace) || meta.namespace,
+        consumerKind: text(binding.kind) || 'RoleBinding',
+        consumerName: meta.name,
+        method: 'rbacSubject'
+      });
+    }
+  }
+}
+
+function collectProviderReferences(target, seen, input) {
+  const providerResources = records(input.providerResources);
+  const certManagerNamespace = clusterResourceNamespace(records(input.workloads));
+
+  for (const resource of providerResources) {
+    const kind = text(resource.kind);
+    const apiVersion = text(resource.apiVersion);
+    const spec = record(resource.spec);
+    const meta = metadata(resource);
+
+    if (kind === 'VaultAuth' || kind === 'VaultAuthGlobal') {
+      const kubernetes = record(spec.kubernetes);
+      const aws = record(spec.aws);
+      addControllerReference(target, seen, resource, { resourceKind: 'ServiceAccount', resourceName: text(kubernetes.serviceAccount), method: 'vaultAuthServiceAccount' });
+      addControllerReference(target, seen, resource, { resourceKind: 'ServiceAccount', resourceName: text(aws.irsaServiceAccount), method: 'vaultAuthServiceAccount' });
+      addControllerReference(target, seen, resource, { resourceKind: 'Secret', resourceName: referencedName(record(spec.appRole).secretRef), method: 'controllerSecret' });
+      addControllerReference(target, seen, resource, { resourceKind: 'Secret', resourceName: referencedName(aws.secretRef), method: 'controllerSecret' });
+    }
+
+    if (kind === 'VaultConnection') {
+      addControllerReference(target, seen, resource, { resourceKind: 'Secret', resourceName: text(spec.caCertSecretRef), method: 'controllerSecret' });
+    }
+
+    if (['VaultStaticSecret', 'VaultDynamicSecret', 'VaultPKISecret'].includes(kind)) {
+      addControllerReference(target, seen, resource, { resourceKind: 'Secret', resourceName: text(record(spec.destination).name), method: 'managedOutput' });
+    }
+
+    if (kind === 'Certificate' && apiVersion.startsWith('cert-manager.io/')) {
+      addControllerReference(target, seen, resource, { resourceKind: 'Secret', resourceName: text(spec.secretName), method: 'managedOutput' });
+    }
+
+    if ((kind === 'Issuer' || kind === 'ClusterIssuer') && apiVersion.startsWith('cert-manager.io/')) {
+      const issuerNamespace = kind === 'ClusterIssuer' ? certManagerNamespace : meta.namespace;
+      addControllerReference(target, seen, resource, { resourceKind: 'Secret', resourceName: text(record(record(spec.acme).privateKeySecretRef).name), namespace: issuerNamespace, method: 'controllerSecret' });
+      addControllerReference(target, seen, resource, { resourceKind: 'Secret', resourceName: text(record(spec.ca).secretName), namespace: issuerNamespace, method: 'controllerSecret' });
+      addControllerReference(target, seen, resource, { resourceKind: 'Secret', resourceName: referencedName(record(record(record(spec.vault).auth).appRole).secretRef), namespace: issuerNamespace, method: 'controllerSecret' });
+    }
+
+    if (kind === 'BackupStorageLocation' && apiVersion.startsWith('velero.io/')) {
+      addControllerReference(target, seen, resource, { resourceKind: 'Secret', resourceName: text(record(spec.credential).name), method: 'controllerSecret' });
+      addControllerReference(target, seen, resource, { resourceKind: 'Secret', resourceName: text(record(record(spec.objectStorage).caCertRef).name), method: 'controllerSecret' });
+    }
+
+    if (kind === 'VolumeSnapshotLocation' && apiVersion.startsWith('velero.io/')) {
+      addControllerReference(target, seen, resource, { resourceKind: 'Secret', resourceName: text(record(spec.credential).name), method: 'controllerSecret' });
+    }
+
+    if (kind === 'IngressRoute' && /traefik\.(io|containo\.us)\//.test(apiVersion)) {
+      addControllerReference(target, seen, resource, { resourceKind: 'Secret', resourceName: text(record(spec.tls).secretName), method: 'ingressTls' });
+    }
+
+    if (kind === 'Middleware' && /traefik\.(io|containo\.us)\//.test(apiVersion)) {
+      for (const secretName of [record(spec.basicAuth).secret, record(spec.digestAuth).secret, record(record(spec.forwardAuth).tls).caSecret, record(record(spec.forwardAuth).tls).certSecret]) {
+        addControllerReference(target, seen, resource, { resourceKind: 'Secret', resourceName: text(secretName), method: 'controllerSecret' });
+      }
+    }
+
+    if (kind === 'TLSStore' && /traefik\.(io|containo\.us)\//.test(apiVersion)) {
+      addControllerReference(target, seen, resource, { resourceKind: 'Secret', resourceName: text(record(spec.defaultCertificate).secretName), method: 'ingressTls' });
+    }
+
+    if (kind === 'Gateway' && apiVersion.startsWith('gateway.networking.k8s.io/')) {
+      for (const listener of records(spec.listeners)) {
+        for (const certificateRef of records(record(listener.tls).certificateRefs)) {
+          if (text(certificateRef.kind || 'Secret') !== 'Secret') continue;
+          addControllerReference(target, seen, resource, {
+            resourceKind: 'Secret',
+            resourceName: text(certificateRef.name),
+            namespace: text(certificateRef.namespace) || meta.namespace,
+            method: 'ingressTls'
+          });
+        }
+      }
+    }
+  }
+
+  const workloads = records(input.workloads);
+  const argoNamespaces = new Set(workloads.filter((item) => /(^|-)argocd($|-)/i.test(metadata(item).name)).map((item) => metadata(item).namespace));
+  const vsoNamespaces = new Set(workloads.filter((item) => /vault-secrets-operator/i.test(metadata(item).name)).map((item) => metadata(item).namespace));
+  const veleroNamespaces = new Set(workloads.filter((item) => /(^|-)velero($|-)/i.test(metadata(item).name)).map((item) => metadata(item).namespace));
+
+  for (const configMap of records(input.configMaps)) {
+    const meta = metadata(configMap);
+    const labels = record(record(configMap).metadata).labels;
+    const argoNames = new Set(['argocd-cm', 'argocd-rbac-cm', 'argocd-cmd-params-cm', 'argocd-tls-certs-cm', 'argocd-ssh-known-hosts-cm']);
+    if (argoNamespaces.has(meta.namespace) && (argoNames.has(meta.name) || text(record(labels)['app.kubernetes.io/part-of']) === 'argocd')) {
+      addReference(target, seen, { resourceKind: 'ConfigMap', resourceName: meta.name, namespace: meta.namespace, consumerKind: 'ArgoCD', consumerName: 'controller', method: 'controllerConfig', confidence: 'exact' });
+    }
+    if (vsoNamespaces.has(meta.namespace) && /vault-secrets-operator-manager-config$/.test(meta.name)) {
+      addReference(target, seen, { resourceKind: 'ConfigMap', resourceName: meta.name, namespace: meta.namespace, consumerKind: 'VaultSecretsOperator', consumerName: 'controller', method: 'controllerConfig', confidence: 'exact' });
+    }
+    for (const owner of records(record(record(configMap).metadata).ownerReferences)) {
+      addReference(target, seen, { resourceKind: 'ConfigMap', resourceName: meta.name, namespace: meta.namespace, consumerKind: text(owner.kind) || 'Controller', consumerName: text(owner.name), method: 'managedOutput', confidence: 'exact' });
+    }
+  }
+
+  for (const secret of records(input.secrets)) {
+    const meta = metadata(secret);
+    const labels = record(record(secret).metadata).labels;
+    const ownerReferences = records(record(record(secret).metadata).ownerReferences);
+    const argoSecretType = text(record(labels)['argocd.argoproj.io/secret-type']);
+    const argoNames = new Set(['argocd-secret', 'argocd-server-tls', 'argocd-repo-server-tls', 'argocd-dex-server-tls']);
+    if (argoNamespaces.has(meta.namespace) && (argoNames.has(meta.name) || Boolean(argoSecretType))) {
+      addReference(target, seen, { resourceKind: 'Secret', resourceName: meta.name, namespace: meta.namespace, consumerKind: 'ArgoCD', consumerName: argoSecretType || 'controller', method: 'controllerSecret', confidence: 'exact' });
+    }
+    if (vsoNamespaces.has(meta.namespace) && /-cc-storage-hmac-key$/.test(meta.name)) {
+      addReference(target, seen, { resourceKind: 'Secret', resourceName: meta.name, namespace: meta.namespace, consumerKind: 'VaultSecretsOperator', consumerName: 'client-cache', method: 'controllerSecret', confidence: 'exact' });
+    }
+    if (veleroNamespaces.has(meta.namespace) && meta.name === 'velero-repo-credentials') {
+      addReference(target, seen, { resourceKind: 'Secret', resourceName: meta.name, namespace: meta.namespace, consumerKind: 'Velero', consumerName: 'backup-repository', method: 'controllerSecret', confidence: 'exact' });
+    }
+    for (const owner of ownerReferences) {
+      addReference(target, seen, { resourceKind: 'Secret', resourceName: meta.name, namespace: meta.namespace, consumerKind: text(owner.kind) || 'Controller', consumerName: text(owner.name), method: 'managedOutput', confidence: 'exact' });
+    }
+  }
 }
 
 export function collectResourceReferences(input) {
@@ -288,6 +511,9 @@ export function collectResourceReferences(input) {
     }
   }
 
+  collectBindingReferences(references, seen, [...records(input.roleBindings), ...records(input.clusterRoleBindings)]);
+  collectProviderReferences(references, seen, input);
+
   return references;
 }
 
@@ -307,6 +533,16 @@ export function podRelatedResources(input) {
       ? [referenceKey('Secret', secretMeta.namespace, secretMeta.name)]
       : [];
   }));
+  const knownResources = new Set([
+    ...records(input.configMaps).map((item) => {
+      const itemMeta = metadata(item);
+      return referenceKey('ConfigMap', itemMeta.namespace, itemMeta.name);
+    }),
+    ...records(input.secrets).map((item) => {
+      const itemMeta = metadata(item);
+      return referenceKey('Secret', itemMeta.namespace, itemMeta.name);
+    })
+  ]);
   return collectResourceReferences({
     pods: [input.pod],
     configMaps: input.configMaps,
@@ -317,13 +553,17 @@ export function podRelatedResources(input) {
   })
     .filter((item) => item.consumerKind === 'Pod' && item.consumerName === meta.name && item.namespace === meta.namespace)
     .map((item) => {
+      const inventoryComplete = item.resourceKind === 'Secret' ? input.secretsComplete !== false : input.configMapsComplete !== false;
+      const targetState = knownResources.has(referenceKey(item.resourceKind, item.namespace, item.resourceName))
+        ? 'present'
+        : inventoryComplete ? 'missing' : 'unknown';
       if (item.resourceKind === 'Secret' && systemSecrets.has(referenceKey('Secret', item.namespace, item.resourceName))) {
-        return { ...item, systemManaged: true, systemReason: 'service-account-token' };
+        return { ...item, targetState, systemManaged: true, systemReason: 'service-account-token' };
       }
-      if (item.resourceKind !== 'ConfigMap') return item;
+      if (item.resourceKind !== 'ConfigMap') return { ...item, targetState };
       const classification = configMapClassifications.get(referenceKey('ConfigMap', item.namespace, item.resourceName));
       return classification?.systemManaged
-        ? { ...item, systemManaged: true, systemReason: classification.systemReason }
-        : item;
+        ? { ...item, targetState, systemManaged: true, systemReason: classification.systemReason }
+        : { ...item, targetState };
     });
 }

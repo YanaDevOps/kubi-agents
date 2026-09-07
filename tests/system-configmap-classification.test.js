@@ -68,4 +68,29 @@ describe('system-managed ConfigMap classification', () => {
     expect(response.partial).toBe(true);
     expect(response.issues.some((issue) => issue.message.includes('findings were withheld'))).toBe(true);
   });
+
+  test('keeps RBAC and Vault controller ServiceAccounts out of ghost findings', () => {
+    const serviceAccounts = [
+      { metadata: { name: 'argocd-redis-secret-init', namespace: 'argocd' } },
+      { metadata: { name: 'telegram-bot-vault', namespace: 'kubi-landing' } },
+      { metadata: { name: 'actual-orphan', namespace: 'apps' } }
+    ];
+    const roleBindings = [{
+      kind: 'RoleBinding', metadata: { name: 'redis-init', namespace: 'argocd' },
+      subjects: [{ kind: 'ServiceAccount', name: 'argocd-redis-secret-init', namespace: 'argocd' }]
+    }];
+    const providerResources = [{
+      apiVersion: 'secrets.hashicorp.com/v1beta1', kind: 'VaultAuth',
+      metadata: { name: 'landing', namespace: 'kubi-landing' },
+      spec: { kubernetes: { serviceAccount: 'telegram-bot-vault' } }
+    }];
+    const response = buildRuntimeGhostResources(
+      [], [], [], [], [], [], [], serviceAccounts, [],
+      '2026-09-07T00:00:00.000Z', null, [], false, [],
+      { configMaps: true, secrets: true, serviceAccounts: true },
+      { roleBindings, clusterRoleBindings: [], providerResources }
+    );
+
+    expect(response.issuesList.items.filter((issue) => issue.category === 'unused-serviceaccounts').map((issue) => issue.resourceName)).toEqual(['actual-orphan']);
+  });
 });
