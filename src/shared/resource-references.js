@@ -1,3 +1,5 @@
+import { classifySystemConfigMap } from './system-configmap.js';
+
 function record(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
 }
@@ -295,6 +297,16 @@ export function referencedResourceKeys(references) {
 
 export function podRelatedResources(input) {
   const meta = metadata(input.pod);
+  const configMapClassifications = new Map(records(input.configMaps).map((configMap) => {
+    const configMapMeta = metadata(configMap);
+    return [referenceKey('ConfigMap', configMapMeta.namespace, configMapMeta.name), classifySystemConfigMap(configMap)];
+  }));
+  const systemSecrets = new Set(records(input.secrets).flatMap((secret) => {
+    const secretMeta = metadata(secret);
+    return text(secret.type) === 'kubernetes.io/service-account-token'
+      ? [referenceKey('Secret', secretMeta.namespace, secretMeta.name)]
+      : [];
+  }));
   return collectResourceReferences({
     pods: [input.pod],
     configMaps: input.configMaps,
@@ -302,5 +314,16 @@ export function podRelatedResources(input) {
     workloads: [],
     serviceAccounts: [],
     ingresses: []
-  }).filter((item) => item.consumerKind === 'Pod' && item.consumerName === meta.name && item.namespace === meta.namespace);
+  })
+    .filter((item) => item.consumerKind === 'Pod' && item.consumerName === meta.name && item.namespace === meta.namespace)
+    .map((item) => {
+      if (item.resourceKind === 'Secret' && systemSecrets.has(referenceKey('Secret', item.namespace, item.resourceName))) {
+        return { ...item, systemManaged: true, systemReason: 'service-account-token' };
+      }
+      if (item.resourceKind !== 'ConfigMap') return item;
+      const classification = configMapClassifications.get(referenceKey('ConfigMap', item.namespace, item.resourceName));
+      return classification?.systemManaged
+        ? { ...item, systemManaged: true, systemReason: classification.systemReason }
+        : item;
+    });
 }

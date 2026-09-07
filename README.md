@@ -109,6 +109,7 @@ See [Prometheus metrics](docs/prometheus-metrics.md) for secure remote scraping 
 
 - The hosted relay is outbound WSS over port 443.
 - Kubernetes and CI operations are read-only and bounded.
+- Secret and ConfigMap cleanup findings are emitted only when the agent can verify all supported Pod and workload references; incomplete RBAC coverage is reported instead of producing false orphan findings.
 - Raw kubeconfigs and provider credentials stay customer-side.
 - The loopback runtime listens on `127.0.0.1:47641`; do not expose it publicly.
 - Credential files must be regular files and must not be group- or world-readable on POSIX hosts.

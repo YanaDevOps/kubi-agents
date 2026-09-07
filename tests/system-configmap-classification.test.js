@@ -54,4 +54,18 @@ describe('system-managed ConfigMap classification', () => {
     expect(JSON.stringify(response)).not.toContain('private marker text');
     expect(JSON.stringify(response)).not.toContain('kubernetes.io/description');
   });
+
+  test('withholds unused Secret and ConfigMap findings when reference coverage is incomplete', () => {
+    const response = buildRuntimeGhostResources(
+      [], [], [], [], [], [configMap('possibly-used', 'apps')],
+      [{ metadata: { name: 'possibly-used-secret', namespace: 'apps' }, type: 'Opaque' }],
+      [], [], '2026-09-07T00:00:00.000Z', null, [], true, [],
+      { configMaps: false, secrets: false }
+    );
+
+    expect(response.summary.unusedConfigMaps).toBe(0);
+    expect(response.summary.unusedSecrets).toBe(0);
+    expect(response.partial).toBe(true);
+    expect(response.issues.some((issue) => issue.message.includes('findings were withheld'))).toBe(true);
+  });
 });

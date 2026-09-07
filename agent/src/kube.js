@@ -2852,8 +2852,15 @@ function isRuntimeSystemNamespace(namespace) {
   return namespace === 'kube-system' || namespace === 'kube-public' || namespace === 'kube-node-lease';
 }
 
-export function buildRuntimeGhostResources(services, endpointSlices, ingresses, pvcs, pods, configMaps, secrets, serviceAccounts, replicaSets, fetchedAt, namespaceScope, issues = [], partial = false, workloads = []) {
+export function buildRuntimeGhostResources(services, endpointSlices, ingresses, pvcs, pods, configMaps, secrets, serviceAccounts, replicaSets, fetchedAt, namespaceScope, issues = [], partial = false, workloads = [], referenceCoverage = {}) {
   const ghostIssues = [];
+  const runtimeIssues = [...issues];
+  const configMapUsageComplete = referenceCoverage.configMaps !== false;
+  const secretUsageComplete = referenceCoverage.secrets !== false;
+  const effectivePartial = partial || !configMapUsageComplete || !secretUsageComplete;
+  if (!configMapUsageComplete || !secretUsageComplete) {
+    runtimeIssues.push(partialIssue('ghost-resources', 'Secret or ConfigMap usage could not be verified completely. Unused-resource findings were withheld.'));
+  }
   const serviceRecords = asRecordArray(services);
   const serviceKeys = new Set(serviceRecords.map((service) => referenceKey(metadataFor(service).namespace, metadataFor(service).name)));
   const endpointSliceRecords = asRecordArray(endpointSlices);
@@ -2890,13 +2897,13 @@ export function buildRuntimeGhostResources(services, endpointSlices, ingresses, 
       pushRuntimeGhostIssue(ghostIssues, { category: 'unused-pvc', severity: 'warning', resourceKind: 'PersistentVolumeClaim', resourceName: meta.name, namespace: meta.namespace, reason: 'Bound PVC is not mounted by any runtime-visible pod.', related: [{ kind: 'PersistentVolumeClaim', name: meta.name, namespace: meta.namespace }], suggestedActions: ['Confirm the claim is still needed before deleting it.'] });
     }
   }
-  for (const configMap of asRecordArray(configMaps)) {
+  for (const configMap of configMapUsageComplete ? asRecordArray(configMaps) : []) {
     const meta = metadataFor(configMap);
     if (!referencedResources.has(`configmap:${referenceKey(meta.namespace, meta.name)}`)) {
       pushRuntimeGhostIssue(ghostIssues, { category: 'unused-configmaps', severity: 'info', resourceKind: 'ConfigMap', resourceName: meta.name, namespace: meta.namespace, reason: 'No reference was found in Pods, workload templates, ServiceAccounts, Ingress TLS, or exact container arguments.', ...classifySystemConfigMap(configMap), related: [{ kind: 'ConfigMap', name: meta.name, namespace: meta.namespace }], suggestedActions: ['Check application configuration history before cleanup.'] });
     }
   }
-  for (const secret of asRecordArray(secrets)) {
+  for (const secret of secretUsageComplete ? asRecordArray(secrets) : []) {
     const meta = metadataFor(secret);
     const type = stringOrUndefined(secret.type) || 'Opaque';
     if (!isRuntimeSystemNamespace(meta.namespace) && type !== 'kubernetes.io/service-account-token' && !meta.name.startsWith('sh.helm.release.v1.') && !referencedResources.has(`secret:${referenceKey(meta.namespace, meta.name)}`)) {
@@ -2925,9 +2932,9 @@ export function buildRuntimeGhostResources(services, endpointSlices, ingresses, 
   }
   return {
     fetchedAt,
-    issues,
-    partial,
-    availability: buildAvailability(issues, partial),
+    issues: runtimeIssues,
+    partial: effectivePartial,
+    availability: buildAvailability(runtimeIssues, effectivePartial),
     namespaceScope,
     summary: {
       total: ghostIssues.length,
@@ -2942,7 +2949,7 @@ export function buildRuntimeGhostResources(services, endpointSlices, ingresses, 
       orphanReplicaSets: ghostIssues.filter((issue) => issue.category === 'orphan-replicasets').length,
       orphanEndpointSlices: ghostIssues.filter((issue) => issue.category === 'orphan-endpointslices').length
     },
-    issuesList: buildResourceList(ghostIssues, fetchedAt, [], partial)
+    issuesList: buildResourceList(ghostIssues, fetchedAt, [], effectivePartial)
   };
 }
 
@@ -2984,7 +2991,15 @@ export async function loadLocalGhostResources(runtimeConfig, namespaceScope = nu
     const cronJobs = settledSection(requests[13], 'ghost-resources', 'CronJobs could not be checked for resource references.', 'The CronJob list was truncated for ghost-resource checks.', issues);
     const workloads = [...deployments.items, ...statefulSets.items, ...daemonSets.items, ...replicaSets.items, ...jobs.items, ...cronJobs.items];
     const partial = services.partial || endpointSlices.partial || ingresses.partial || pvcs.partial || pods.partial || configMaps.partial || secrets.partial || serviceAccounts.partial || replicaSets.partial || deployments.partial || statefulSets.partial || daemonSets.partial || jobs.partial || cronJobs.partial;
-    return buildRuntimeGhostResources(services.items, endpointSlices.items, ingresses.items, pvcs.items, pods.items, configMaps.items, secrets.items, serviceAccounts.items, replicaSets.items, new Date().toISOString(), effectiveNamespace, issues, partial, workloads);
+    const workloadReferencesComplete = !deployments.partial && !statefulSets.partial && !daemonSets.partial && !replicaSets.partial && !jobs.partial && !cronJobs.partial;
+    return buildRuntimeGhostResources(
+      services.items, endpointSlices.items, ingresses.items, pvcs.items, pods.items, configMaps.items, secrets.items,
+      serviceAccounts.items, replicaSets.items, new Date().toISOString(), effectiveNamespace, issues, partial, workloads,
+      {
+        configMaps: !configMaps.partial && !pods.partial && workloadReferencesComplete,
+        secrets: !configMaps.partial && !secrets.partial && !pods.partial && !serviceAccounts.partial && !ingresses.partial && workloadReferencesComplete
+      }
+    );
   } catch (error) {
     throw new Error(sanitizeKubeError(error));
   }
