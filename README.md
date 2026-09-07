@@ -152,4 +152,4 @@ npm test
 
 The source package is ESM and targets Node.js 22+. Never commit kubeconfigs, pairing identities, provider tokens, private keys, or generated credential files.
 
-Agent `v0.1.38` adds controller-aware Ghost Resource analysis, validates optional Pod resource targets before the SaaS links them, and stops reconnecting after a terminal revoked or invalid identity response. Runtime API compatibility remains v2.
+Agent `v0.1.39` adds accurate ServiceAccount target validation to Pod related resources. It also includes the controller-aware Ghost Resource analysis, optional resource validation, and terminal relay identity handling introduced in `v0.1.38`. Runtime API compatibility remains v2.

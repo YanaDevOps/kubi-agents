@@ -541,6 +541,10 @@ export function podRelatedResources(input) {
     ...records(input.secrets).map((item) => {
       const itemMeta = metadata(item);
       return referenceKey('Secret', itemMeta.namespace, itemMeta.name);
+    }),
+    ...records(input.serviceAccounts).map((item) => {
+      const itemMeta = metadata(item);
+      return referenceKey('ServiceAccount', itemMeta.namespace, itemMeta.name);
     })
   ]);
   return collectResourceReferences({
@@ -553,7 +557,11 @@ export function podRelatedResources(input) {
   })
     .filter((item) => item.consumerKind === 'Pod' && item.consumerName === meta.name && item.namespace === meta.namespace)
     .map((item) => {
-      const inventoryComplete = item.resourceKind === 'Secret' ? input.secretsComplete !== false : input.configMapsComplete !== false;
+      const inventoryComplete = item.resourceKind === 'Secret'
+        ? input.secretsComplete !== false
+        : item.resourceKind === 'ServiceAccount'
+          ? input.serviceAccountsComplete !== false
+          : input.configMapsComplete !== false;
       const targetState = knownResources.has(referenceKey(item.resourceKind, item.namespace, item.resourceName))
         ? 'present'
         : inventoryComplete ? 'missing' : 'unknown';

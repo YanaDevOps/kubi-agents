@@ -1921,10 +1921,12 @@ export async function loadLocalPodRelatedResources(runtimeConfig, input) {
     const pod = await fetchKubeJson(kubeConfig, `/api/v1/namespaces/${encodedNamespace}/pods/${encodedName}`);
     const resources = await Promise.allSettled([
       fetchKubeList(kubeConfig, `/api/v1/namespaces/${encodedNamespace}/configmaps`),
-      fetchKubeList(kubeConfig, `/api/v1/namespaces/${encodedNamespace}/secrets`)
+      fetchKubeList(kubeConfig, `/api/v1/namespaces/${encodedNamespace}/secrets`),
+      fetchKubeList(kubeConfig, `/api/v1/namespaces/${encodedNamespace}/serviceaccounts`)
     ]);
     const configMaps = resources[0].status === 'fulfilled' ? resources[0].value.items : [];
     const secrets = resources[1].status === 'fulfilled' ? resources[1].value.items : [];
+    const serviceAccounts = resources[2].status === 'fulfilled' ? resources[2].value.items : [];
     return {
       namespace,
       pod: name,
@@ -1932,12 +1934,15 @@ export async function loadLocalPodRelatedResources(runtimeConfig, input) {
         pod,
         configMaps,
         secrets,
+        serviceAccounts,
         configMapsComplete: resources[0].status === 'fulfilled' && !resources[0].value.truncated,
-        secretsComplete: resources[1].status === 'fulfilled' && !resources[1].value.truncated
+        secretsComplete: resources[1].status === 'fulfilled' && !resources[1].value.truncated,
+        serviceAccountsComplete: resources[2].status === 'fulfilled' && !resources[2].value.truncated
       }),
       partial: resources.some((entry) => entry.status === 'rejected') ||
         (resources[0].status === 'fulfilled' && resources[0].value.truncated) ||
-        (resources[1].status === 'fulfilled' && resources[1].value.truncated)
+        (resources[1].status === 'fulfilled' && resources[1].value.truncated) ||
+        (resources[2].status === 'fulfilled' && resources[2].value.truncated)
     };
   } catch (error) {
     throw new Error(sanitizeKubeError(error));
