@@ -24,7 +24,8 @@ export const MCP_RESOURCE_CATALOG = [
   { id: 'image-risk', label: 'Image risk', category: 'Validation', description: 'Container image tag and pull-policy findings', path: '/v1/image-risk', appPath: '/app/validation/image-risk', namespaceScoped: true },
   { id: 'rbac', label: 'RBAC', category: 'Validation', description: 'Roles, bindings, and effective permission summaries', path: '/v1/rbac', appPath: '/app/rbac', namespaceScoped: true },
   { id: 'metrics', label: 'Metrics', category: 'Observability', description: 'Metrics API node and pod samples when available', path: '/v1/metrics', appPath: '/app/workloads', namespaceScoped: true },
-  { id: 'secrets', label: 'Secret metadata', category: 'Security', description: 'Secret names, types, references, and risk metadata; values are never exposed', path: '/v1/secrets', appPath: '/app/secrets', namespaceScoped: true, redactSecretData: true }
+  { id: 'secrets', label: 'Secret metadata', category: 'Security & Config', description: 'Secret names, types, references, and risk metadata; values are never exposed', path: '/v1/secrets', appPath: '/app/secrets', namespaceScoped: true, redactSecretData: true },
+  { id: 'configmaps', label: 'ConfigMap metadata', category: 'Security & Config', description: 'ConfigMap names, keys, ownership, and workload references; values are never exposed through MCP', path: '/v1/configmaps', appPath: '/app/configmaps', namespaceScoped: true, redactSecretData: true }
 ];
 
 export function mcpResourceById(id) {

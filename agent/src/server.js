@@ -28,6 +28,8 @@ import {
   loadLocalVip,
   loadLocalRbac,
   loadLocalSecrets,
+  loadLocalConfigMaps,
+  loadLocalConfigMapContent,
   loadLocalServices,
   loadLocalServiceMesh,
   loadLocalStorage,
@@ -199,6 +201,8 @@ export function createAgentLoopbackServer(options) {
   const workloadsProvider = options.workloadsProvider || loadLocalWorkloads;
   const servicesProvider = options.servicesProvider || loadLocalServices;
   const secretsProvider = options.secretsProvider || loadLocalSecrets;
+  const configMapsProvider = options.configMapsProvider || loadLocalConfigMaps;
+  const configMapContentProvider = options.configMapContentProvider || loadLocalConfigMapContent;
   const crdsProvider = options.crdsProvider || loadLocalCrds;
   const crdObjectsProvider = options.crdObjectsProvider || loadLocalCrdObjects;
   const storageProvider = options.storageProvider || loadLocalStorage;
@@ -677,6 +681,25 @@ export function createAgentLoopbackServer(options) {
         return {
           status: 200,
           payload: await secretsProvider(runtimeConfig, url.searchParams.get('ns')),
+          headers: responseCorsHeaders
+        };
+      }
+
+      if (url.pathname === '/v1/configmaps') {
+        return {
+          status: 200,
+          payload: await configMapsProvider(runtimeConfig, url.searchParams.get('ns')),
+          headers: responseCorsHeaders
+        };
+      }
+
+      if (url.pathname === '/v1/configmaps/content') {
+        return {
+          status: 200,
+          payload: await configMapContentProvider(runtimeConfig, {
+            namespace: url.searchParams.get('ns') || '',
+            name: url.searchParams.get('name') || ''
+          }),
           headers: responseCorsHeaders
         };
       }

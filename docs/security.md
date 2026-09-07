@@ -14,7 +14,9 @@ The loopback listener on `127.0.0.1:47641` remains for local diagnostics and com
 
 External CI integrations are opt-in and run only in the customer-side agent. Provider credentials are loaded from protected regular files and never returned by effective configuration, logs, or runtime responses. Provider HTTP uses GET only, same-origin redirects, bounded time and response size, and an explicit repository/project/job allowlist. CI logs, artifacts, variables, workspaces, credentials, and mutation endpoints are excluded.
 
-Hosted MCP reads use the same outbound relay and one fixed observe-only resource catalog. The agent never accepts an arbitrary MCP path. Logs, Events, arbitrary custom-resource objects, alerting configuration, Secret values, and all mutations are outside the MCP contract. Secret value fields are removed again at the hosted MCP boundary.
+Hosted MCP reads use the same outbound relay and one fixed observe-only resource catalog. The agent never accepts an arbitrary MCP path. Logs, Events, arbitrary custom-resource objects, alerting configuration, Secret values, ConfigMap values, and all mutations are outside the MCP contract. Secret and ConfigMap value fields are removed again at the hosted MCP boundary.
+
+ConfigMap inventory is metadata-only and includes names, keys, ownership, and workload references. Text values are fetched only through the separate interactive content endpoint after an explicit UI action, are not catalogued for MCP, and are not persisted by KUBI. Binary values never cross the runtime boundary; only their key and decoded byte size are returned.
 
 The optional Prometheus endpoint is a separate server and cannot route to the local runtime API. Its default aggregate level emits bounded context totals. The explicit balanced level additionally labels node, namespace, and workload state, but never Pod or container names. Its default bind is `127.0.0.1:9464`; remote binds require a protected bearer-token file and TLS unless authenticated plaintext HTTP is explicitly enabled on a trusted network.
 

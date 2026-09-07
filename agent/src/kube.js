@@ -14,6 +14,7 @@ import {
 } from '../../src/shared/backup-activity.js';
 import { deriveRuntimeTargetKey } from '../../src/shared/runtime-target.js';
 import { classifySystemConfigMap } from '../../src/shared/system-configmap.js';
+import { buildConfigMapInventory, configMapContent } from '../../src/shared/configmap-inventory.js';
 import {
   collectResourceReferences,
   podRelatedResources,
@@ -2274,6 +2275,62 @@ export async function loadLocalSecrets(runtimeConfig, namespaceScope = null) {
     const serviceAccounts = settledSection(requests[2], 'secrets', 'ServiceAccounts could not be loaded for Secret references.', 'The ServiceAccount list was truncated for Secret references.', issues);
     const ingresses = settledSection(requests[3], 'secrets', 'Ingresses could not be loaded for TLS Secret references.', 'The Ingress list was truncated for Secret references.', issues);
     return buildRuntimeSecretInventory(secrets.items, pods.items, serviceAccounts.items, ingresses.items, new Date().toISOString(), effectiveNamespace, issues, secrets.partial || pods.partial || serviceAccounts.partial || ingresses.partial);
+  } catch (error) {
+    throw new Error(sanitizeKubeError(error));
+  }
+}
+
+export async function loadLocalConfigMaps(runtimeConfig, namespaceScope = null) {
+  try {
+    const kubeConfig = loadLocalKubeConfig(runtimeConfig);
+    const effectiveNamespace = namespaceScope || runtimeConfig.namespace || null;
+    const requests = await Promise.allSettled([
+      fetchKubeList(kubeConfig, namespacePath('/api/v1/configmaps', '/api/v1/namespaces/:namespace/configmaps', effectiveNamespace)),
+      fetchKubeList(kubeConfig, namespacePath('/api/v1/pods', '/api/v1/namespaces/:namespace/pods', effectiveNamespace)),
+      fetchKubeList(kubeConfig, namespacePath('/api/v1/secrets', '/api/v1/namespaces/:namespace/secrets', effectiveNamespace)),
+      fetchKubeList(kubeConfig, namespacePath('/apis/apps/v1/deployments', '/apis/apps/v1/namespaces/:namespace/deployments', effectiveNamespace)),
+      fetchKubeList(kubeConfig, namespacePath('/apis/apps/v1/statefulsets', '/apis/apps/v1/namespaces/:namespace/statefulsets', effectiveNamespace)),
+      fetchKubeList(kubeConfig, namespacePath('/apis/apps/v1/daemonsets', '/apis/apps/v1/namespaces/:namespace/daemonsets', effectiveNamespace)),
+      fetchKubeList(kubeConfig, namespacePath('/apis/batch/v1/jobs', '/apis/batch/v1/namespaces/:namespace/jobs', effectiveNamespace)),
+      fetchKubeList(kubeConfig, namespacePath('/apis/batch/v1/cronjobs', '/apis/batch/v1/namespaces/:namespace/cronjobs', effectiveNamespace))
+    ]);
+    if (requests[0].status === 'rejected') throw requests[0].reason;
+    const issues = [];
+    const labels = ['ConfigMaps', 'Pods', 'Secrets', 'Deployments', 'StatefulSets', 'DaemonSets', 'Jobs', 'CronJobs'];
+    const sections = requests.map((result, index) => settledSection(
+      result,
+      'configmaps',
+      `${labels[index]} could not be loaded for ConfigMap inventory.`,
+      `The ${labels[index]} list was truncated for ConfigMap inventory.`,
+      issues
+    ));
+    return buildConfigMapInventory({
+      configMaps: sections[0].items,
+      pods: sections[1].items,
+      secrets: sections[2].items,
+      workloads: sections.slice(3).flatMap((section) => section.items),
+      fetchedAt: new Date().toISOString(),
+      namespaceScope: effectiveNamespace,
+      issues,
+      partial: sections.some((section) => section.partial),
+      referencesComplete: sections.slice(1).every((section) => !section.partial)
+    });
+  } catch (error) {
+    throw new Error(sanitizeKubeError(error));
+  }
+}
+
+export async function loadLocalConfigMapContent(runtimeConfig, input) {
+  try {
+    const namespace = input?.namespace || runtimeConfig.namespace || 'default';
+    const name = input?.name;
+    if (!name) throw new Error('ConfigMap name is required.');
+    const kubeConfig = loadLocalKubeConfig(runtimeConfig);
+    const value = await fetchKubeJson(
+      kubeConfig,
+      `/api/v1/namespaces/${encodeURIComponent(namespace)}/configmaps/${encodeURIComponent(name)}`
+    );
+    return configMapContent(value);
   } catch (error) {
     throw new Error(sanitizeKubeError(error));
   }

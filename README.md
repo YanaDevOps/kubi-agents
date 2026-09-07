@@ -152,4 +152,4 @@ npm test
 
 The source package is ESM and targets Node.js 22+. Never commit kubeconfigs, pairing identities, provider tokens, private keys, or generated credential files.
 
-Agent `v0.1.39` adds accurate ServiceAccount target validation to Pod related resources. It also includes the controller-aware Ghost Resource analysis, optional resource validation, and terminal relay identity handling introduced in `v0.1.38`. Runtime API compatibility remains v2.
+Agent `v0.1.40` adds metadata-only ConfigMap inventory, workload-reference analysis, and an explicitly lazy ConfigMap content endpoint. Inventory and MCP responses expose names and keys but never values; binary content is reduced to key and byte-size metadata. It retains the ServiceAccount validation from `v0.1.39`, and runtime API compatibility remains v2.
