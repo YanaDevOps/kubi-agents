@@ -19,7 +19,9 @@ import {
   loadLocalNamespaces,
   loadLocalNodes,
   loadLocalPods,
+  loadLocalPodDns,
   loadLocalPodLogs,
+  loadLocalPodRelatedResources,
   loadLocalPorts,
   loadLocalTraffic,
   loadLocalCni,
@@ -191,7 +193,9 @@ export function createAgentLoopbackServer(options) {
   const namespacesProvider = options.namespacesProvider || loadLocalNamespaces;
   const nodesProvider = options.nodesProvider || loadLocalNodes;
   const podsProvider = options.podsProvider || loadLocalPods;
+  const podDnsProvider = options.podDnsProvider || loadLocalPodDns;
   const podLogsProvider = options.podLogsProvider || loadLocalPodLogs;
+  const podRelatedResourcesProvider = options.podRelatedResourcesProvider || loadLocalPodRelatedResources;
   const workloadsProvider = options.workloadsProvider || loadLocalWorkloads;
   const servicesProvider = options.servicesProvider || loadLocalServices;
   const secretsProvider = options.secretsProvider || loadLocalSecrets;
@@ -598,6 +602,28 @@ export function createAgentLoopbackServer(options) {
             name: url.searchParams.get('name') || '',
             container: url.searchParams.get('container') || undefined,
             tail: url.searchParams.get('tail') || undefined
+          }),
+          headers: responseCorsHeaders
+        };
+      }
+
+      if (url.pathname === '/v1/pods/dns') {
+        return {
+          status: 200,
+          payload: await podDnsProvider(runtimeConfig, {
+            namespace: url.searchParams.get('ns') || '',
+            name: url.searchParams.get('name') || ''
+          }),
+          headers: responseCorsHeaders
+        };
+      }
+
+      if (url.pathname === '/v1/pods/related-resources') {
+        return {
+          status: 200,
+          payload: await podRelatedResourcesProvider(runtimeConfig, {
+            namespace: url.searchParams.get('ns') || '',
+            name: url.searchParams.get('name') || ''
           }),
           headers: responseCorsHeaders
         };

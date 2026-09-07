@@ -144,7 +144,7 @@ async function runAgent() {
     },
     onRequestComplete({ endpoint, status, durationMs }) {
       const message = `KUBI hosted relay request ${endpoint} completed with HTTP ${status || 'error'} in ${durationMs}ms.`;
-      if (endpoint === '/v1/delivery-activity') logger.info(message);
+      if (endpoint === '/v1/delivery-activity' || durationMs >= 2_000 || status >= 500) logger.info(message);
       else logger.debug(message);
     }
   });

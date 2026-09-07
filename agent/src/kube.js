@@ -15,6 +15,11 @@ import {
 import { deriveRuntimeTargetKey } from '../../src/shared/runtime-target.js';
 import { classifySystemConfigMap } from '../../src/shared/system-configmap.js';
 import {
+  collectResourceReferences,
+  podRelatedResources,
+  referencedResourceKeys
+} from '../../src/shared/resource-references.js';
+import {
   buildStorageProviderHealth,
   canonicalStorageProviderId,
   normalizeCSINode,
@@ -33,8 +38,13 @@ import {
   DELIVERY_RESOURCE_DEFINITIONS,
   buildDeliveryActivitySummary as buildSharedDeliveryActivitySummary,
   deliveryDefinitionsForSection,
+  deliveryProviderIdsFromSignals as sharedDeliveryProviderIdsFromSignals,
   deliveryKindAllowed as sharedDeliveryKindAllowed
 } from '../../src/shared/delivery-activity.js';
+import {
+  buildPodDnsSummary,
+  clusterDomainFromCoreDnsConfigMap
+} from '../../src/shared/pod-dns.js';
 import {
   buildPortsTruthSummary,
   buildTrafficIntentSummary,
@@ -1873,6 +1883,60 @@ export async function loadLocalPodLogs(runtimeConfig, input) {
   }
 }
 
+export async function loadLocalPodDns(runtimeConfig, input) {
+  try {
+    const kubeConfig = loadLocalKubeConfig(runtimeConfig);
+    const namespace = input?.namespace || runtimeConfig.namespace || 'default';
+    const name = input?.name;
+    if (!name) {
+      throw new Error('Pod name is required.');
+    }
+
+    const podPath = `/api/v1/namespaces/${encodeURIComponent(namespace)}/pods/${encodeURIComponent(name)}`;
+    const [pod, services, coreDnsConfigMap] = await Promise.all([
+      fetchKubeJson(kubeConfig, podPath),
+      fetchKubeList(kubeConfig, `/api/v1/namespaces/${encodeURIComponent(namespace)}/services`),
+      fetchKubeJson(kubeConfig, '/api/v1/namespaces/kube-system/configmaps/coredns').catch(() => null)
+    ]);
+
+    return buildPodDnsSummary({
+      pod,
+      services: services.items,
+      clusterDomain: clusterDomainFromCoreDnsConfigMap(coreDnsConfigMap)
+    });
+  } catch (error) {
+    throw new Error(sanitizeKubeError(error));
+  }
+}
+
+export async function loadLocalPodRelatedResources(runtimeConfig, input) {
+  try {
+    const kubeConfig = loadLocalKubeConfig(runtimeConfig);
+    const namespace = input?.namespace || runtimeConfig.namespace || 'default';
+    const name = input?.name;
+    if (!name) throw new Error('Pod name is required.');
+    const encodedNamespace = encodeURIComponent(namespace);
+    const encodedName = encodeURIComponent(name);
+    const pod = await fetchKubeJson(kubeConfig, `/api/v1/namespaces/${encodedNamespace}/pods/${encodedName}`);
+    const resources = await Promise.allSettled([
+      fetchKubeList(kubeConfig, `/api/v1/namespaces/${encodedNamespace}/configmaps`),
+      fetchKubeList(kubeConfig, `/api/v1/namespaces/${encodedNamespace}/secrets`)
+    ]);
+    const configMaps = resources[0].status === 'fulfilled' ? resources[0].value.items : [];
+    const secrets = resources[1].status === 'fulfilled' ? resources[1].value.items : [];
+    return {
+      namespace,
+      pod: name,
+      items: podRelatedResources({ pod, configMaps, secrets }),
+      partial: resources.some((entry) => entry.status === 'rejected') ||
+        (resources[0].status === 'fulfilled' && resources[0].value.truncated) ||
+        (resources[1].status === 'fulfilled' && resources[1].value.truncated)
+    };
+  } catch (error) {
+    throw new Error(sanitizeKubeError(error));
+  }
+}
+
 export async function loadLocalJobLogs(runtimeConfig, input) {
   try {
     const kubeConfig = loadLocalKubeConfig(runtimeConfig);
@@ -2771,8 +2835,6 @@ function pushRuntimeGhostIssue(issues, input) {
 
 function collectRuntimePodRefs(pods) {
   const pvcs = new Set();
-  const configMaps = new Set();
-  const secrets = new Set();
   const serviceAccounts = new Set();
   for (const pod of asRecordArray(pods)) {
     const meta = metadataFor(pod);
@@ -2780,41 +2842,30 @@ function collectRuntimePodRefs(pods) {
     serviceAccounts.add(referenceKey(meta.namespace, stringOrUndefined(spec?.serviceAccountName) || 'default'));
     for (const volume of asRecordArray(spec?.volumes)) {
       const pvcName = stringOrUndefined(asRecord(volume.persistentVolumeClaim)?.claimName);
-      const configMapName = stringOrUndefined(asRecord(volume.configMap)?.name);
-      const secretName = stringOrUndefined(asRecord(volume.secret)?.secretName);
       if (pvcName) pvcs.add(referenceKey(meta.namespace, pvcName));
-      if (configMapName) configMaps.add(referenceKey(meta.namespace, configMapName));
-      if (secretName) secrets.add(referenceKey(meta.namespace, secretName));
-    }
-    for (const container of podContainersForRefs(pod)) {
-      for (const env of asRecordArray(container.env)) {
-        const valueFrom = asRecord(env.valueFrom);
-        const configMapName = stringOrUndefined(asRecord(valueFrom?.configMapKeyRef)?.name);
-        const secretName = stringOrUndefined(asRecord(valueFrom?.secretKeyRef)?.name);
-        if (configMapName) configMaps.add(referenceKey(meta.namespace, configMapName));
-        if (secretName) secrets.add(referenceKey(meta.namespace, secretName));
-      }
-      for (const envFrom of asRecordArray(container.envFrom)) {
-        const configMapName = stringOrUndefined(asRecord(envFrom.configMapRef)?.name);
-        const secretName = stringOrUndefined(asRecord(envFrom.secretRef)?.name);
-        if (configMapName) configMaps.add(referenceKey(meta.namespace, configMapName));
-        if (secretName) secrets.add(referenceKey(meta.namespace, secretName));
-      }
     }
   }
-  return { pvcs, configMaps, secrets, serviceAccounts };
+  return { pvcs, serviceAccounts };
 }
 
 function isRuntimeSystemNamespace(namespace) {
   return namespace === 'kube-system' || namespace === 'kube-public' || namespace === 'kube-node-lease';
 }
 
-export function buildRuntimeGhostResources(services, endpointSlices, ingresses, pvcs, pods, configMaps, secrets, serviceAccounts, replicaSets, fetchedAt, namespaceScope, issues = [], partial = false) {
+export function buildRuntimeGhostResources(services, endpointSlices, ingresses, pvcs, pods, configMaps, secrets, serviceAccounts, replicaSets, fetchedAt, namespaceScope, issues = [], partial = false, workloads = []) {
   const ghostIssues = [];
   const serviceRecords = asRecordArray(services);
   const serviceKeys = new Set(serviceRecords.map((service) => referenceKey(metadataFor(service).namespace, metadataFor(service).name)));
   const endpointSliceRecords = asRecordArray(endpointSlices);
   const podRefs = collectRuntimePodRefs(pods);
+  const referencedResources = referencedResourceKeys(collectResourceReferences({
+    pods: asRecordArray(pods),
+    configMaps: asRecordArray(configMaps),
+    secrets: asRecordArray(secrets),
+    serviceAccounts: asRecordArray(serviceAccounts),
+    ingresses: asRecordArray(ingresses),
+    workloads: asRecordArray(workloads)
+  }));
   for (const service of serviceRecords) {
     const meta = metadataFor(service);
     const selector = asStringRecord(asRecord(service.spec)?.selector);
@@ -2841,15 +2892,15 @@ export function buildRuntimeGhostResources(services, endpointSlices, ingresses, 
   }
   for (const configMap of asRecordArray(configMaps)) {
     const meta = metadataFor(configMap);
-    if (!podRefs.configMaps.has(referenceKey(meta.namespace, meta.name))) {
-      pushRuntimeGhostIssue(ghostIssues, { category: 'unused-configmaps', severity: 'info', resourceKind: 'ConfigMap', resourceName: meta.name, namespace: meta.namespace, reason: 'ConfigMap is not referenced by pod volumes, env, or envFrom in the current snapshot.', ...classifySystemConfigMap(configMap), related: [{ kind: 'ConfigMap', name: meta.name, namespace: meta.namespace }], suggestedActions: ['Check application configuration history before cleanup.'] });
+    if (!referencedResources.has(`configmap:${referenceKey(meta.namespace, meta.name)}`)) {
+      pushRuntimeGhostIssue(ghostIssues, { category: 'unused-configmaps', severity: 'info', resourceKind: 'ConfigMap', resourceName: meta.name, namespace: meta.namespace, reason: 'No reference was found in Pods, workload templates, ServiceAccounts, Ingress TLS, or exact container arguments.', ...classifySystemConfigMap(configMap), related: [{ kind: 'ConfigMap', name: meta.name, namespace: meta.namespace }], suggestedActions: ['Check application configuration history before cleanup.'] });
     }
   }
   for (const secret of asRecordArray(secrets)) {
     const meta = metadataFor(secret);
     const type = stringOrUndefined(secret.type) || 'Opaque';
-    if (!isRuntimeSystemNamespace(meta.namespace) && type !== 'kubernetes.io/service-account-token' && !meta.name.startsWith('sh.helm.release.v1.') && !podRefs.secrets.has(referenceKey(meta.namespace, meta.name))) {
-      pushRuntimeGhostIssue(ghostIssues, { category: 'unused-secrets', severity: 'info', resourceKind: 'Secret', resourceName: meta.name, namespace: meta.namespace, reason: 'Secret is not referenced by pods in volumes, env, envFrom, or imagePullSecrets in the current snapshot.', related: [{ kind: 'Secret', name: meta.name, namespace: meta.namespace }], suggestedActions: ['Verify no external controller consumes this Secret before cleanup.'] });
+    if (!isRuntimeSystemNamespace(meta.namespace) && type !== 'kubernetes.io/service-account-token' && !meta.name.startsWith('sh.helm.release.v1.') && !referencedResources.has(`secret:${referenceKey(meta.namespace, meta.name)}`)) {
+      pushRuntimeGhostIssue(ghostIssues, { category: 'unused-secrets', severity: 'info', resourceKind: 'Secret', resourceName: meta.name, namespace: meta.namespace, reason: 'No reference was found in Pods, workload templates, ServiceAccounts, Ingress TLS, or exact container arguments.', related: [{ kind: 'Secret', name: meta.name, namespace: meta.namespace }], suggestedActions: ['Verify no external controller consumes this Secret before cleanup.'] });
     }
   }
   for (const serviceAccount of asRecordArray(serviceAccounts)) {
@@ -2908,7 +2959,12 @@ export async function loadLocalGhostResources(runtimeConfig, namespaceScope = nu
       fetchKubeList(kubeConfig, namespacePath('/api/v1/configmaps', '/api/v1/namespaces/:namespace/configmaps', effectiveNamespace)),
       fetchKubeList(kubeConfig, namespacePath('/api/v1/secrets', '/api/v1/namespaces/:namespace/secrets', effectiveNamespace)),
       fetchKubeList(kubeConfig, namespacePath('/api/v1/serviceaccounts', '/api/v1/namespaces/:namespace/serviceaccounts', effectiveNamespace)),
-      fetchKubeList(kubeConfig, namespacePath('/apis/apps/v1/replicasets', '/apis/apps/v1/namespaces/:namespace/replicasets', effectiveNamespace))
+      fetchKubeList(kubeConfig, namespacePath('/apis/apps/v1/replicasets', '/apis/apps/v1/namespaces/:namespace/replicasets', effectiveNamespace)),
+      fetchKubeList(kubeConfig, namespacePath('/apis/apps/v1/deployments', '/apis/apps/v1/namespaces/:namespace/deployments', effectiveNamespace)),
+      fetchKubeList(kubeConfig, namespacePath('/apis/apps/v1/statefulsets', '/apis/apps/v1/namespaces/:namespace/statefulsets', effectiveNamespace)),
+      fetchKubeList(kubeConfig, namespacePath('/apis/apps/v1/daemonsets', '/apis/apps/v1/namespaces/:namespace/daemonsets', effectiveNamespace)),
+      fetchKubeList(kubeConfig, namespacePath('/apis/batch/v1/jobs', '/apis/batch/v1/namespaces/:namespace/jobs', effectiveNamespace)),
+      fetchKubeList(kubeConfig, namespacePath('/apis/batch/v1/cronjobs', '/apis/batch/v1/namespaces/:namespace/cronjobs', effectiveNamespace))
     ]);
     if (requests.every((entry) => entry.status === 'rejected')) throw requests[0].reason;
     const issues = [];
@@ -2921,7 +2977,14 @@ export async function loadLocalGhostResources(runtimeConfig, namespaceScope = nu
     const secrets = settledSection(requests[6], 'ghost-resources', 'Secrets could not be loaded for ghost-resource checks.', 'The Secret list was truncated for ghost-resource checks.', issues);
     const serviceAccounts = settledSection(requests[7], 'ghost-resources', 'ServiceAccounts could not be loaded for ghost-resource checks.', 'The ServiceAccount list was truncated for ghost-resource checks.', issues);
     const replicaSets = settledSection(requests[8], 'ghost-resources', 'ReplicaSets could not be loaded for ghost-resource checks.', 'The ReplicaSet list was truncated for ghost-resource checks.', issues);
-    return buildRuntimeGhostResources(services.items, endpointSlices.items, ingresses.items, pvcs.items, pods.items, configMaps.items, secrets.items, serviceAccounts.items, replicaSets.items, new Date().toISOString(), effectiveNamespace, issues, services.partial || endpointSlices.partial || ingresses.partial || pvcs.partial || pods.partial || configMaps.partial || secrets.partial || serviceAccounts.partial || replicaSets.partial);
+    const deployments = settledSection(requests[9], 'ghost-resources', 'Deployments could not be checked for resource references.', 'The Deployment list was truncated for ghost-resource checks.', issues);
+    const statefulSets = settledSection(requests[10], 'ghost-resources', 'StatefulSets could not be checked for resource references.', 'The StatefulSet list was truncated for ghost-resource checks.', issues);
+    const daemonSets = settledSection(requests[11], 'ghost-resources', 'DaemonSets could not be checked for resource references.', 'The DaemonSet list was truncated for ghost-resource checks.', issues);
+    const jobs = settledSection(requests[12], 'ghost-resources', 'Jobs could not be checked for resource references.', 'The Job list was truncated for ghost-resource checks.', issues);
+    const cronJobs = settledSection(requests[13], 'ghost-resources', 'CronJobs could not be checked for resource references.', 'The CronJob list was truncated for ghost-resource checks.', issues);
+    const workloads = [...deployments.items, ...statefulSets.items, ...daemonSets.items, ...replicaSets.items, ...jobs.items, ...cronJobs.items];
+    const partial = services.partial || endpointSlices.partial || ingresses.partial || pvcs.partial || pods.partial || configMaps.partial || secrets.partial || serviceAccounts.partial || replicaSets.partial || deployments.partial || statefulSets.partial || daemonSets.partial || jobs.partial || cronJobs.partial;
+    return buildRuntimeGhostResources(services.items, endpointSlices.items, ingresses.items, pvcs.items, pods.items, configMaps.items, secrets.items, serviceAccounts.items, replicaSets.items, new Date().toISOString(), effectiveNamespace, issues, partial, workloads);
   } catch (error) {
     throw new Error(sanitizeKubeError(error));
   }
@@ -4206,6 +4269,7 @@ function normalizeBackupActivityBackup(record) {
   const meta = metadataFor(record);
   const spec = asRecord(record.spec);
   const status = asRecord(record.status);
+  const progress = asRecord(status?.progress);
   const startedAt = stringOrUndefined(status?.startTimestamp);
   const finishedAt = stringOrUndefined(status?.completionTimestamp);
   return {
@@ -4217,7 +4281,7 @@ function normalizeBackupActivityBackup(record) {
     duration: compactDuration(startedAt, finishedAt),
     ttl: stringOrUndefined(spec?.ttl),
     expiresAt: stringOrUndefined(status?.expiration),
-    storageLocation: stringOrUndefined(spec?.storageLocation),
+    storageLocation: stringOrUndefined(spec?.storageLocation) || meta.labels?.['velero.io/storage-location'],
     includedNamespaces: stringList(spec?.includedNamespaces),
     excludedNamespaces: stringList(spec?.excludedNamespaces),
     includedResources: stringList(spec?.includedResources),
@@ -4227,14 +4291,18 @@ function normalizeBackupActivityBackup(record) {
     volumeBackupMode: spec?.defaultVolumesToFsBackup === true ? 'Filesystem' : undefined,
     uploaderType: stringOrUndefined(spec?.uploaderType),
     hooksCount: countHooks(spec),
-    itemsBackedUp: numberOrZero(status?.itemsBackedUp) || undefined,
-    itemsTotal: numberOrZero(status?.itemsTotal) || undefined,
+    itemsBackedUp: typeof progress?.itemsBackedUp === 'number'
+      ? progress.itemsBackedUp
+      : typeof status?.itemsBackedUp === 'number' ? status.itemsBackedUp : undefined,
+    itemsTotal: typeof progress?.totalItems === 'number'
+      ? progress.totalItems
+      : typeof status?.itemsTotal === 'number' ? status.itemsTotal : undefined,
     warnings: numberOrZero(status?.warnings),
     errors: numberOrZero(status?.errors),
     failureReason: stringOrUndefined(status?.failureReason),
     validationErrors: stringList(status?.validationErrors),
     issueMessages: issueMessages(record),
-    scheduleName: stringOrUndefined(spec?.scheduleName)
+    scheduleName: meta.labels?.['velero.io/schedule-name'] || stringOrUndefined(spec?.scheduleName)
   };
 }
 
@@ -4438,11 +4506,6 @@ function deliveryControllerPodPath(provider) {
 
 function deliveryProviderCrdName(provider) {
   return DELIVERY_PROVIDER_MARKERS[provider];
-}
-
-function deliveryProviderIdsFromCrds(items) {
-  const names = new Set(asRecordArray(items).map((item) => metadataFor(item).name));
-  return DELIVERY_PROVIDER_IDS.filter((providerId) => names.has(deliveryProviderCrdName(providerId)));
 }
 
 async function fetchOptionalDeliveryProviderCrd(kubeConfig, provider) {
@@ -4718,6 +4781,7 @@ function buildRuntimeDeliveryActivity(resourceSections, podsRaw, crdsRaw, fetche
  * @param {any} runtimeConfig
  * @param {string | null} [namespaceScope]
  * @param {'argocd' | 'flux' | 'tekton' | 'argo-workflows' | 'argo-rollouts' | 'flagger' | null} [provider]
+ * @param {'overview' | 'deployments' | 'pipelines' | 'configuration' | 'components' | null} [section]
  */
 export async function loadLocalDeliveryActivity(runtimeConfig, namespaceScope = null, provider = null, section = null) {
   try {
@@ -4744,9 +4808,10 @@ export async function loadLocalDeliveryActivity(runtimeConfig, namespaceScope = 
     const crdRequest = supportRequests[1];
     const detectedProviderIds = selectedProvider
       ? [selectedProvider]
-      : crdRequest.status === 'fulfilled' && !crdRequest.value.truncated
-        ? deliveryProviderIdsFromCrds(crdRequest.value.items)
-        : DELIVERY_PROVIDER_IDS;
+      : sharedDeliveryProviderIdsFromSignals({
+          pods: podRequest.status === 'fulfilled' ? podRequest.value.items : [],
+          crds: crdRequest.status === 'fulfilled' && !crdRequest.value.truncated ? crdRequest.value.items : []
+        });
     const selectedDefinitions = deliveryDefinitionsForSection(
       DELIVERY_RESOURCE_DEFINITIONS.filter((definition) => detectedProviderIds.includes(definition.providerId)),
       section
@@ -4782,6 +4847,10 @@ export async function loadLocalDeliveryActivity(runtimeConfig, namespaceScope = 
     if (pods.truncated) {
       partial = true;
       issues.push(truncationIssue('delivery-activity', 'The Pod list was truncated for delivery controller detection.'));
+    }
+    if (!selectedProvider && crdRequest.status === 'rejected') {
+      partial = true;
+      issues.push(partialIssue('delivery-activity', 'The CRD list could not be loaded; delivery provider detection used controller pods only.'));
     }
     const crds = selectedProvider
       ? {

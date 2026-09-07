@@ -31,6 +31,7 @@ export const BACKUP_RESOURCE_DEFINITIONS = [
   definition('velero', 'velero-backup', 'velero.io', ['v1'], 'backups', 'Backup'),
   definition('velero', 'velero-restore', 'velero.io', ['v1'], 'restores', 'Restore'),
   definition('velero', 'velero-schedule', 'velero.io', ['v1'], 'schedules', 'Schedule'),
+  definition('velero', 'velero-pod-volume-backup', 'velero.io', ['v1'], 'podvolumebackups', 'PodVolumeBackup'),
   definition('csi', 'csi-snapshot', 'snapshot.storage.k8s.io', ['v1', 'v1beta1'], 'volumesnapshots', 'VolumeSnapshot'),
   definition('csi', 'csi-snapshot-content', 'snapshot.storage.k8s.io', ['v1', 'v1beta1'], 'volumesnapshotcontents', 'VolumeSnapshotContent', false),
   definition('csi', 'csi-snapshot-class', 'snapshot.storage.k8s.io', ['v1', 'v1beta1'], 'volumesnapshotclasses', 'VolumeSnapshotClass', false),
@@ -79,6 +80,7 @@ function text(value) {
 
 function number(value) {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (value === null || value === undefined || value === '' || typeof value === 'boolean') return undefined;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : undefined;
 }
@@ -169,12 +171,83 @@ function veleroIssues(status) {
   ];
 }
 
-function normalizeVeleroBackup(def, item) {
+function veleroMetadataEntries(value) {
+  return Object.entries(record(value))
+    .filter(([key]) => key.startsWith('velero.io/'))
+    .map(([key, value]) => ({ key, value: text(value) }))
+    .filter((entry) => entry.value)
+    .sort((left, right) => left.key.localeCompare(right.key));
+}
+
+function normalizeVeleroPodVolumeBackup(item) {
+  const meta = record(item.metadata);
+  const labels = record(meta.labels);
   const spec = record(item.spec);
   const status = record(item.status);
+  const progress = record(status.progress);
+  const owner = list(meta.ownerReferences).map(record).find((entry) => text(entry.kind) === 'Backup') || {};
+  return {
+    name: text(meta.name) || 'Unknown',
+    resourceNamespace: text(meta.namespace) || 'default',
+    backupName: text(labels['velero.io/backup-name']),
+    backupUid: text(labels['velero.io/backup-uid']),
+    ownerName: text(owner.name),
+    ownerUid: text(owner.uid),
+    podNamespace: text(record(spec.pod).namespace) || 'default',
+    podName: text(record(spec.pod).name) || 'Unknown',
+    volumeName: text(spec.volume) || 'Unknown',
+    uploaderType: text(spec.uploaderType),
+    phase: text(status.phase) || 'Unknown',
+    nodeName: text(spec.node),
+    startedAt: text(status.startTimestamp),
+    finishedAt: text(status.completionTimestamp),
+    bytesDone: number(progress.bytesDone),
+    sizeBytes: number(progress.totalBytes),
+    incrementalBytes: number(status.incrementalBytes),
+    message: text(status.message)
+  };
+}
+
+function matchesVeleroBackup(volumeBackup, backupMeta) {
+  const namespace = text(backupMeta.namespace) || 'default';
+  if (volumeBackup.resourceNamespace !== namespace) return false;
+  const uid = text(backupMeta.uid);
+  const name = text(backupMeta.name);
+  if (uid && (volumeBackup.backupUid === uid || volumeBackup.ownerUid === uid)) return true;
+  return Boolean(name && (volumeBackup.ownerName === name || volumeBackup.backupName === name));
+}
+
+function publicVeleroPodVolumeBackup(volumeBackup) {
+  const {
+    backupName: _backupName,
+    backupUid: _backupUid,
+    ownerName: _ownerName,
+    ownerUid: _ownerUid,
+    ...publicFields
+  } = volumeBackup;
+  return publicFields;
+}
+
+function normalizeVeleroBackup(def, item, lookups) {
+  const meta = record(item.metadata);
+  const spec = record(item.spec);
+  const status = record(item.status);
+  const statusProgress = record(status.progress);
+  const labels = record(meta.labels);
   const startedAt = text(status.startTimestamp);
   const finishedAt = text(status.completionTimestamp);
   const phase = text(status.phase) || 'Unknown';
+  const itemsBackedUp = number(statusProgress.itemsBackedUp) ?? number(status.itemsBackedUp);
+  const itemsTotal = number(statusProgress.totalItems) ?? number(status.itemsTotal);
+  const podVolumeBackups = lookups.veleroPodVolumeBackups
+    .filter((entry) => matchesVeleroBackup(entry, meta))
+    .map(publicVeleroPodVolumeBackup)
+    .sort((left, right) => left.podNamespace.localeCompare(right.podNamespace)
+      || left.podName.localeCompare(right.podName)
+      || left.volumeName.localeCompare(right.volumeName));
+  const uploaderTypes = [...new Set(podVolumeBackups.map((entry) => entry.uploaderType).filter(Boolean))];
+  const metadataLabels = veleroMetadataEntries(meta.labels);
+  const metadataAnnotations = veleroMetadataEntries(meta.annotations);
   return {
     ...base(def, item),
     phase,
@@ -185,7 +258,7 @@ function normalizeVeleroBackup(def, item) {
     duration: duration(startedAt, finishedAt),
     ttl: text(spec.ttl),
     expiresAt: text(status.expiration),
-    storageLocation: sanitizeLocation(spec.storageLocation),
+    storageLocation: sanitizeLocation(spec.storageLocation) || sanitizeLocation(labels['velero.io/storage-location']),
     includedNamespaces: strings(spec.includedNamespaces),
     excludedNamespaces: strings(spec.excludedNamespaces),
     includedResources: strings(spec.includedResources),
@@ -193,17 +266,24 @@ function normalizeVeleroBackup(def, item) {
     labelSelector: text(spec.labelSelector),
     snapshotVolumes: spec.snapshotVolumes === undefined ? undefined : String(spec.snapshotVolumes),
     volumeBackupMode: spec.defaultVolumesToFsBackup === true ? 'Filesystem' : undefined,
-    uploaderType: text(spec.uploaderType),
+    uploaderType: text(spec.uploaderType) || (uploaderTypes.length === 1 ? uploaderTypes[0] : undefined),
     hooksCount: list(record(spec.hooks).resources).length,
-    itemsBackedUp: number(status.itemsBackedUp),
-    itemsTotal: number(status.itemsTotal),
+    itemsBackedUp,
+    itemsTotal,
     warnings: number(status.warnings) || 0,
     errors: number(status.errors) || 0,
     failureReason: text(status.failureReason),
     validationErrors: strings(status.validationErrors),
     issueMessages: veleroIssues(status),
-    scheduleName: text(spec.scheduleName),
-    progress: number(status.progress)
+    scheduleName: text(labels['velero.io/schedule-name']) || text(spec.scheduleName),
+    progress: itemsBackedUp !== undefined && itemsTotal && itemsTotal > 0
+      ? Math.min(100, Math.max(0, itemsBackedUp / itemsTotal * 100))
+      : undefined,
+    velero: {
+      labels: metadataLabels,
+      annotations: metadataAnnotations,
+      podVolumeBackups
+    }
   };
 }
 
@@ -465,7 +545,7 @@ function normalizeCsi(def, item, lookups) {
 }
 
 function normalizeResource(def, item, lookups) {
-  if (def.parser === 'velero-backup') return { bucket: 'backups', item: normalizeVeleroBackup(def, item) };
+  if (def.parser === 'velero-backup') return { bucket: 'backups', item: normalizeVeleroBackup(def, item, lookups) };
   if (def.parser === 'velero-restore') return { bucket: 'restores', item: normalizeVeleroRestore(def, item) };
   if (def.parser === 'velero-schedule') return { bucket: 'schedules', item: normalizeVeleroSchedule(def, item) };
   if (def.parser === 'csi-snapshot') return { bucket: 'snapshots', item: normalizeCsi(def, item, lookups) };
@@ -520,9 +600,13 @@ export function buildUniversalBackupActivitySummary({
   const oadpDetected = resources.some((entry) => entry?.definition?.parser === 'oadp-detection' && list(entry.items).length > 0);
   const csiClassResources = resources.filter((entry) => entry?.definition?.parser === 'csi-snapshot-class');
   const csiContentResources = resources.filter((entry) => entry?.definition?.parser === 'csi-snapshot-content');
+  const veleroPodVolumeBackupResources = resources.filter((entry) => entry?.definition?.parser === 'velero-pod-volume-backup');
   const csiClasses = new Map();
   const csiContents = new Map();
   const csiContentBySnapshot = new Map();
+  const veleroPodVolumeBackups = veleroPodVolumeBackupResources
+    .flatMap((entry) => list(entry.items))
+    .map(normalizeVeleroPodVolumeBackup);
 
   for (const item of csiClassResources.flatMap((entry) => list(entry.items))) {
     csiClasses.set(text(record(item.metadata).name) || '', item);
@@ -546,7 +630,11 @@ export function buildUniversalBackupActivitySummary({
     const state = providerState.get(providerId);
     if (state) {
       state.available ||= entry.available !== false;
-      state.denied ||= entry.denied === true;
+      if (def.parser === 'velero-pod-volume-backup' && entry.denied === true) {
+        state.partial = true;
+      } else {
+        state.denied ||= entry.denied === true;
+      }
       state.partial ||= entry.partial === true;
       state.resources += list(entry.items).length;
     }
@@ -555,16 +643,26 @@ export function buildUniversalBackupActivitySummary({
       outputIssues.push({
         code: 'forbidden',
         section: 'backup-activity',
-        message: `${def.providerName} resources are present but the runtime lacks read permission.`,
+        message: def.parser === 'velero-pod-volume-backup'
+          ? `${def.providerName} pod volume details are unavailable because the runtime lacks read permission.`
+          : `${def.providerName} resources are present but the runtime lacks read permission.`,
         retryable: false
       });
     }
-    if (def.parser === 'oadp-detection' || def.parser === 'csi-snapshot-class' || def.parser === 'csi-snapshot-content') continue;
+    if (def.parser === 'oadp-detection'
+      || def.parser === 'velero-pod-volume-backup'
+      || def.parser === 'csi-snapshot-class'
+      || def.parser === 'csi-snapshot-content') continue;
     if (!def.namespaced && namespaceScope) continue;
     for (const item of list(entry.items)) {
       const itemNamespace = text(record(item.metadata).namespace);
       if (def.namespaced && namespaceScope && itemNamespace && itemNamespace !== namespaceScope) continue;
-      const normalized = normalizeResource(def, item, { csiClasses, csiContents, csiContentBySnapshot });
+      const normalized = normalizeResource(def, item, {
+        csiClasses,
+        csiContents,
+        csiContentBySnapshot,
+        veleroPodVolumeBackups
+      });
       if (normalized) buckets[normalized.bucket].push(normalized.item);
     }
   }
@@ -612,7 +710,7 @@ export function buildUniversalBackupActivitySummary({
     supportedProviders: BACKUP_PROVIDER_IDS.map((providerId) => ({ providerId, providerName: PROVIDERS[providerId] })),
     detectedProviders,
     providerCoverage,
-    volumeBackupModes: [],
+    volumeBackupModes: [...new Set(veleroPodVolumeBackups.map((entry) => entry.uploaderType).filter(Boolean))],
     versions: {},
     summary: {
       providers: detectedProviders.length,

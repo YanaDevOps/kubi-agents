@@ -56,7 +56,12 @@ export function deliveryDefinitionsForSection(definitions, section = null) {
   if (section === 'deployments') return definitions.filter((definition) => definition.category === 'deployment');
   if (section === 'pipelines') return definitions.filter((definition) => definition.category === 'pipeline');
   if (section === 'configuration') {
-    return definitions.filter((definition) => definition.category === 'project' || definition.category === 'source');
+    return definitions.filter((definition) =>
+      definition.category === 'project' ||
+      definition.category === 'source' ||
+      // Argo CD repositories are embedded in Application.spec rather than exposed as source CRDs.
+      (definition.providerId === 'argocd' && definition.parser === 'argo-application')
+    );
   }
   if (section === 'components') return [];
   return definitions;
