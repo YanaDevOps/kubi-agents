@@ -15,6 +15,8 @@ The MCP surface intentionally excludes:
 - Secret `data`, `stringData`, and `binaryData` values.
 - ConfigMap values and the interactive `/v1/configmaps/content` endpoint.
 
+ConfigMap inventory also omits `kubectl.kubernetes.io/last-applied-configuration` because it embeds a full applied resource, and omits any other annotation value larger than 1 KiB. The annotation key, size, and omission reason remain visible.
+
 `kubi_get_resource` accepts a catalog resource ID rather than an arbitrary URL or local agent path. Namespace input is validated before a relay request is sent. Secret and ConfigMap value fields are removed again by the hosted MCP server even though their inventory endpoints are already metadata-only.
 
 Use the MCP bearer token generated in **KUBI APP -> Settings -> MCP Server**. Revoking that token immediately closes hosted and local agent introspection access.

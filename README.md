@@ -152,4 +152,4 @@ npm test
 
 The source package is ESM and targets Node.js 22+. Never commit kubeconfigs, pairing identities, provider tokens, private keys, or generated credential files.
 
-Agent `v0.1.40` adds metadata-only ConfigMap inventory, workload-reference analysis, and an explicitly lazy ConfigMap content endpoint. Inventory and MCP responses expose names and keys but never values; binary content is reduced to key and byte-size metadata. It retains the ServiceAccount validation from `v0.1.39`, and runtime API compatibility remains v2.
+Agent `v0.1.41` prevents applied-resource snapshots and oversized annotation values from entering ConfigMap inventory. `kubectl.kubernetes.io/last-applied-configuration` is always omitted, other annotation values are capped at 1 KiB, and runtime API compatibility remains v2.

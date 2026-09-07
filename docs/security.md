@@ -18,6 +18,8 @@ Hosted MCP reads use the same outbound relay and one fixed observe-only resource
 
 ConfigMap inventory is metadata-only and includes names, keys, ownership, and workload references. Text values are fetched only through the separate interactive content endpoint after an explicit UI action, are not catalogued for MCP, and are not persisted by KUBI. Binary values never cross the runtime boundary; only their key and decoded byte size are returned.
 
+The inventory always removes `kubectl.kubernetes.io/last-applied-configuration`, which may contain a complete copy of ConfigMap data, and removes any other annotation value larger than 1 KiB. It preserves only the annotation key, byte size, and omission reason.
+
 The optional Prometheus endpoint is a separate server and cannot route to the local runtime API. Its default aggregate level emits bounded context totals. The explicit balanced level additionally labels node, namespace, and workload state, but never Pod or container names. Its default bind is `127.0.0.1:9464`; remote binds require a protected bearer-token file and TLS unless authenticated plaintext HTTP is explicitly enabled on a trusted network.
 
 Installers verify SHA-256 before installation. Release assets include cosign signatures and certificates for independent verification.

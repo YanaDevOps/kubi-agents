@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildConfigMapInventory, configMapContent } from '../src/shared/configmap-inventory.js';
+import { buildConfigMapInventory, configMapContent, sanitizeConfigMapInventoryPayload } from '../src/shared/configmap-inventory.js';
 
 function resource(kind, name, namespace = 'apps', extra = {}) {
   return { apiVersion: 'v1', kind, metadata: { name, namespace }, ...extra };
@@ -33,4 +33,45 @@ test('ConfigMap content keeps text lazy and reduces binary values to byte counts
   assert.deepEqual(content.binaryData, [{ key: 'bundle', bytes: 5 }]);
   assert.equal(content.data['app.yaml'], 'replicas: 2');
   assert.equal(JSON.stringify(content).includes('aGVsbG8='), false);
+});
+
+test('ConfigMap inventory omits applied snapshots and oversized annotation values', () => {
+  const applied = JSON.stringify({ data: { password: 'must-not-cross-relay' } });
+  const inventory = buildConfigMapInventory({
+    configMaps: [resource('ConfigMap', 'api-config', 'apps', {
+      metadata: {
+        name: 'api-config',
+        namespace: 'apps',
+        annotations: {
+          'kubectl.kubernetes.io/last-applied-configuration': applied,
+          'example.com/oversized': `-----BEGIN CERTIFICATE-----\n${'A'.repeat(1400)}`,
+          'argocd.argoproj.io/tracking-id': 'apps:/ConfigMap:apps/api-config'
+        }
+      }
+    })]
+  });
+  const item = inventory.configMaps.items[0];
+
+  assert.deepEqual(item.annotations, { 'argocd.argoproj.io/tracking-id': 'apps:/ConfigMap:apps/api-config' });
+  assert.equal(item.omittedAnnotations.length, 2);
+  assert.equal(JSON.stringify(inventory).includes('must-not-cross-relay'), false);
+  assert.equal(JSON.stringify(inventory).includes('BEGIN CERTIFICATE'), false);
+});
+
+test('legacy ConfigMap inventory payloads are sanitized defensively', () => {
+  const inventory = sanitizeConfigMapInventoryPayload({
+    configMaps: { items: [{
+      data: { token: 'raw-data-secret' },
+      binaryData: { certificate: 'raw-binary-secret' },
+      annotations: {
+        'kubectl.kubernetes.io/last-applied-configuration': '{"data":{"token":"legacy-secret"}}'
+      }
+    }] }
+  });
+
+  assert.deepEqual(inventory.configMaps.items[0].annotations, {});
+  assert.equal(inventory.configMaps.items[0].omittedAnnotations[0].reason, 'applied-resource-snapshot');
+  assert.equal(JSON.stringify(inventory).includes('legacy-secret'), false);
+  assert.equal(JSON.stringify(inventory).includes('raw-data-secret'), false);
+  assert.equal(JSON.stringify(inventory).includes('raw-binary-secret'), false);
 });

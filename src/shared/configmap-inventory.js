@@ -1,6 +1,9 @@
 import { collectResourceReferences } from './resource-references.js';
 import { classifySystemConfigMap } from './system-configmap.js';
 
+const LAST_APPLIED_ANNOTATION = 'kubectl.kubernetes.io/last-applied-configuration';
+const MAX_ANNOTATION_VALUE_BYTES = 1024;
+
 function record(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
 }
@@ -17,24 +20,47 @@ function strings(value) {
   return result;
 }
 
+function textBytes(value) {
+  return new TextEncoder().encode(value).byteLength;
+}
+
+function sanitizedAnnotations(value) {
+  const annotations = {};
+  const omittedAnnotations = [];
+  for (const [key, entry] of Object.entries(strings(value))) {
+    const bytes = textBytes(entry);
+    const reason = key === LAST_APPLIED_ANNOTATION
+      ? 'applied-resource-snapshot'
+      : bytes > MAX_ANNOTATION_VALUE_BYTES
+        ? 'value-too-large'
+        : null;
+    if (reason) {
+      omittedAnnotations.push({ key, bytes, reason });
+    } else {
+      annotations[key] = entry;
+    }
+  }
+  return {
+    annotations,
+    omittedAnnotations: omittedAnnotations.sort((left, right) => left.key.localeCompare(right.key))
+  };
+}
+
 function metadata(value) {
   const meta = record(record(value).metadata);
+  const annotationMetadata = sanitizedAnnotations(meta.annotations);
   return {
     name: String(meta.name || ''),
     namespace: String(meta.namespace || 'default'),
     createdAt: typeof meta.creationTimestamp === 'string' ? meta.creationTimestamp : undefined,
     labels: strings(meta.labels),
-    annotations: strings(meta.annotations),
+    ...annotationMetadata,
     owners: records(meta.ownerReferences)
   };
 }
 
 function referenceKey(namespace, name) {
   return `${namespace || 'default'}/${name}`;
-}
-
-function textBytes(value) {
-  return new TextEncoder().encode(value).byteLength;
 }
 
 function base64Bytes(value) {
@@ -92,6 +118,7 @@ export function buildConfigMapInventory(input) {
       createdAt: meta.createdAt,
       labels: meta.labels,
       annotations: meta.annotations,
+      omittedAnnotations: meta.omittedAnnotations,
       dataKeys: Object.keys(data).sort((left, right) => left.localeCompare(right)),
       binaryDataKeys: Object.keys(binaryData).sort((left, right) => left.localeCompare(right)),
       keyCount: Object.keys(data).length + Object.keys(binaryData).length,
@@ -124,6 +151,40 @@ export function buildConfigMapInventory(input) {
       system: items.filter((item) => item.systemManaged).length
     },
     configMaps: { items, fetchedAt, issues, partial, availability: availability(issues, partial) }
+  };
+}
+
+export function sanitizeConfigMapSummary(value) {
+  const item = record(value);
+  const safeItem = { ...item };
+  delete safeItem.data;
+  delete safeItem.stringData;
+  delete safeItem.binaryData;
+  const annotationMetadata = sanitizedAnnotations(item.annotations);
+  const existingOmitted = records(item.omittedAnnotations)
+    .map((entry) => ({
+      key: String(entry.key || ''),
+      bytes: Number.isFinite(Number(entry.bytes)) ? Math.max(0, Number(entry.bytes)) : 0,
+      reason: entry.reason === 'applied-resource-snapshot' ? 'applied-resource-snapshot' : 'value-too-large'
+    }))
+    .filter((entry) => entry.key);
+  const omittedByKey = new Map([...existingOmitted, ...annotationMetadata.omittedAnnotations].map((entry) => [entry.key, entry]));
+  return {
+    ...safeItem,
+    annotations: annotationMetadata.annotations,
+    omittedAnnotations: [...omittedByKey.values()].sort((left, right) => left.key.localeCompare(right.key))
+  };
+}
+
+export function sanitizeConfigMapInventoryPayload(value) {
+  const payload = record(value);
+  const configMaps = record(payload.configMaps);
+  return {
+    ...payload,
+    configMaps: {
+      ...configMaps,
+      items: records(configMaps.items).map(sanitizeConfigMapSummary)
+    }
   };
 }
 
