@@ -23,6 +23,7 @@ export const MCP_RESOURCE_CATALOG = [
   { id: 'ghost-resources', label: 'Ghost resources', category: 'Validation', description: 'Unused and dangling resource findings', path: '/v1/ghost-resources', appPath: '/app/validation/ghost-resources', namespaceScoped: true },
   { id: 'image-risk', label: 'Image risk', category: 'Validation', description: 'Container image tag and pull-policy findings', path: '/v1/image-risk', appPath: '/app/validation/image-risk', namespaceScoped: true },
   { id: 'rbac', label: 'RBAC', category: 'Validation', description: 'Roles, bindings, and effective permission summaries', path: '/v1/rbac', appPath: '/app/rbac', namespaceScoped: true },
+  { id: 'policy-posture', label: 'Policy & Posture', category: 'Security & Config', description: 'Finding, policy, and provider counts, source availability, and tab coverage only; no raw policy configuration, expressions, evidence, or reports. Requires an agent with policyPosture support.', path: '/v1/policy-posture', appPath: '/app/policies', namespaceScoped: true },
   { id: 'metrics', label: 'Metrics', category: 'Observability', description: 'Metrics API node and pod samples when available', path: '/v1/metrics', appPath: '/app/workloads', namespaceScoped: true },
   { id: 'secrets', label: 'Secret metadata', category: 'Security & Config', description: 'Secret names, types, references, and risk metadata; values are never exposed', path: '/v1/secrets', appPath: '/app/secrets', namespaceScoped: true, redactSecretData: true },
   { id: 'configmaps', label: 'ConfigMap metadata', category: 'Security & Config', description: 'ConfigMap names, keys, ownership, and workload references; values are never exposed through MCP', path: '/v1/configmaps', appPath: '/app/configmaps', namespaceScoped: true, redactSecretData: true }
@@ -49,7 +50,7 @@ export function mcpToolDefinitions() {
     },
     {
       name: 'kubi_get_resource',
-      description: 'Read one resource from the KUBI observe-only inventory. Logs, Secret values, events, arbitrary CR objects, alerting configuration, and mutations are not exposed.',
+      description: 'Read one resource from the KUBI observe-only inventory. Logs, Secret values, events, arbitrary CR objects, raw policy configuration, expressions, reports, alerting configuration, and mutations are not exposed.',
       inputSchema: {
         type: 'object',
         properties: {
@@ -71,4 +72,44 @@ export function mcpToolDefinitions() {
       annotations
     }
   ];
+}
+
+// Deliberately project aggregates, rather than recursively removing known secret
+// keys: arbitrary policy/report fields and messages can contain sensitive data.
+// This projection is idempotent so both the agent and hosted MCP can enforce it.
+export function summarizePolicyPostureForMCP(value) {
+  const record = (entry) => entry && typeof entry === 'object' && !Array.isArray(entry) ? entry : {};
+  const count = (entry) => Number.isSafeInteger(entry) && entry >= 0 ? entry : 0;
+  const input = record(value);
+  const projected = input.summaryOnly === true;
+  const findings = Array.isArray(input.findings) ? input.findings : [];
+  const sources = Array.isArray(input.sources) ? input.sources : [];
+  const counts = record(input.counts);
+  const sourceCounts = Object.fromEntries(['available', 'absent', 'denied', 'error', 'partial'].map((status) => [
+    status,
+    projected ? count(record(input.sources)[status]) : sources.filter((entry) =>
+      status === 'partial' ? record(entry).partial === true : record(entry).status === status
+    ).length
+  ]));
+  const validTimestamp = typeof input.fetchedAt === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(input.fetchedAt)
+    && Number.isFinite(Date.parse(input.fetchedAt)) && new Date(input.fetchedAt).toISOString() === input.fetchedAt;
+  return {
+    summaryOnly: true,
+    ...(validTimestamp ? { fetchedAt: input.fetchedAt } : {}),
+    partial: input.partial === true || sourceCounts.partial > 0 || sourceCounts.denied > 0 || sourceCounts.error > 0,
+    unavailable: input.unavailable === true || sourceCounts.available === 0,
+    counts: {
+      findings: projected ? count(counts.findings) : findings.length,
+      policies: projected ? count(counts.policies) : Array.isArray(input.policies) ? input.policies.length : 0,
+      providers: projected ? count(counts.providers) : Array.isArray(input.providers) ? input.providers.length : 0,
+      bySeverity: Object.fromEntries(['critical', 'high', 'medium', 'low', 'warning', 'info'].map((severity) => [
+        severity,
+        projected ? count(record(counts.bySeverity)[severity]) : findings.filter((entry) => record(entry).severity === severity).length
+      ]))
+    },
+    sources: sourceCounts,
+    tabs: Object.fromEntries(['workload', 'network', 'admission', 'image-trust'].map((tab) => [
+      tab, { available: record(record(input.tabs)[tab]).available === true }
+    ]))
+  };
 }

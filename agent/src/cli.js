@@ -21,6 +21,7 @@ const DEFAULT_CAPABILITIES = {
   supportedModes: ['agent'],
   availableAuthKinds: ['unknown', 'token', 'client-cert', 'exec'],
   runtimeApiVersion: LOCAL_AGENT_RUNTIME_API_VERSION,
+  policyPosture: true,
   buildId: AGENT_BUILD_ID
 };
 const RUNNING_RELEASE = {

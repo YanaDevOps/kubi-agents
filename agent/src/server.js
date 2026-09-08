@@ -12,6 +12,7 @@ import {
   loadLocalDomainHealth,
   loadLocalGhostResources,
   loadLocalImageRisk,
+  loadLocalPolicyPosture,
   loadLocalJobs,
   loadLocalJobLogs,
   loadLocalMetrics,
@@ -47,7 +48,7 @@ import {
   saveAlertingConfig,
   testAlertingChannel
 } from './alerting.js';
-import { MCP_RESOURCE_CATALOG, mcpToolDefinitions } from '../../src/shared/mcp-catalog.js';
+import { MCP_RESOURCE_CATALOG, mcpToolDefinitions, summarizePolicyPostureForMCP } from '../../src/shared/mcp-catalog.js';
 import { loadLocalStorageDriverOverview } from './storage-drivers.js';
 import { loadLocalCiPipelines } from './ci/index.js';
 
@@ -228,6 +229,7 @@ export function createAgentLoopbackServer(options) {
   const domainHealthProvider = options.domainHealthProvider || loadLocalDomainHealth;
   const ghostResourcesProvider = options.ghostResourcesProvider || loadLocalGhostResources;
   const imageRiskProvider = options.imageRiskProvider || loadLocalImageRisk;
+  const policyPostureProvider = options.policyPostureProvider || loadLocalPolicyPosture;
   const rbacProvider = options.rbacProvider || loadLocalRbac;
   const portsProvider = options.portsProvider || loadLocalPorts;
   const trafficProvider = options.trafficProvider || loadLocalTraffic;
@@ -281,12 +283,13 @@ export function createAgentLoopbackServer(options) {
       });
       return introspection;
     } catch (runtimeError) {
-      const introspection = await introspectMCPClient({
+      const mcpIntrospection = await introspectMCPClient({
         controlPlaneUrl: options.runtimeConfig.controlPlaneUrl,
         agentId: options.runtimeConfig.agentId,
         agentSecret: options.runtimeConfig.agentSecret,
         mcpToken: accessToken
       });
+      const introspection = { ...mcpIntrospection, mcpAccess: true };
       mcpIntrospectionCache.set(accessToken, {
         introspection,
         expiresAt: now() + runtimeIntrospectionCacheTtlMs
@@ -431,6 +434,14 @@ export function createAgentLoopbackServer(options) {
       };
     }
 
+    if (introspection.mcpAccess && (
+      request.method !== 'GET' ||
+      (!MCP_RESOURCE_CATALOG.some((resource) => resource.path === url.pathname) &&
+        !['/v1/health', '/v1/capability', '/v1/mcp'].includes(url.pathname))
+    )) {
+      return { status: 403, payload: { message: 'Resource is not in the MCP read-only allowlist.' }, headers: responseCorsHeaders };
+    }
+
     let runtimeConfig;
     try {
       runtimeConfig = (options.runtimeConfigResolver || resolveAgentRuntimeConfigForSelector)(
@@ -534,6 +545,7 @@ export function createAgentLoopbackServer(options) {
           connectionId: introspection.connectionId,
           agentVersion: runtimeConfig.version || 'unknown',
           runtimeApiVersion: runtimeConfig.runtimeApiVersion || undefined,
+          policyPosture: true,
           buildId: runtimeConfig.buildId || undefined,
           expiresAt: introspection.expiresAt,
           scopes: introspection.scopes
@@ -847,6 +859,24 @@ export function createAgentLoopbackServer(options) {
         };
       }
 
+      if (url.pathname === '/v1/policy-posture') {
+        const namespace = url.searchParams.get('ns');
+        if (namespace && namespace !== 'all' && (namespace.length > 63 || !/^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/.test(namespace))) {
+          return { status: 400, payload: { message: 'Invalid Kubernetes namespace.' }, headers: responseCorsHeaders };
+        }
+        if (!Array.isArray(introspection.scopes) || !introspection.scopes.includes('runtime:read')) {
+          return { status: 403, payload: { message: 'A runtime read scope is required.' }, headers: responseCorsHeaders };
+        }
+        const payload = await policyPostureProvider(runtimeConfig, namespace === 'all' ? null : namespace, {
+          forceRefresh: url.searchParams.get('forceRefresh') === 'true'
+        });
+        return {
+          status: 200,
+          payload: introspection.mcpAccess ? summarizePolicyPostureForMCP(payload) : payload,
+          headers: responseCorsHeaders
+        };
+      }
+
       if (url.pathname === '/v1/rbac') {
         return {
           status: 200,
@@ -898,7 +928,9 @@ export function createAgentLoopbackServer(options) {
       return {
         status: 502,
         payload: {
-          message: error instanceof Error ? error.message : 'The local agent could not read cluster data.'
+          message: introspection.mcpAccess && url.pathname === '/v1/policy-posture'
+            ? 'The agent could not load the Policy & Posture summary.'
+            : error instanceof Error ? error.message : 'The local agent could not read cluster data.'
         },
         headers: responseCorsHeaders
       };

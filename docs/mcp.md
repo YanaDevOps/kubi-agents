@@ -4,6 +4,12 @@ KUBI exposes the selected agent-backed connection through the Premium hosted MCP
 
 The agent and SaaS share one fixed resource catalog. It covers cluster inventory, networking, storage and backup summaries, platform components, Kubernetes-native delivery activity, external CI pipeline summaries, validation, RBAC, metrics, CRD metadata, Secret metadata, and ConfigMap metadata.
 
+Agent `v0.1.42` adds `policy-posture` aggregate counts and source/tab coverage.
+Raw policy configuration, expressions, report messages, and evidence are not
+exposed through MCP. Both the agent and hosted MCP project the safe summary;
+an MCP token cannot bypass this projection by requesting arbitrary CRD objects.
+The app page itself is available in both plans; MCP retains its existing plan policy.
+
 The MCP surface intentionally excludes:
 
 - Kubernetes mutations;

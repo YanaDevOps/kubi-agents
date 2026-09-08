@@ -99,6 +99,22 @@ KUBI reads Kubernetes-native delivery resources for Argo CD, Flux, Tekton, Argo 
 
 External provider credentials are read from protected files on the agent host. KUBI does not request CI logs, artifacts, variables, workspaces, credentials, or mutation permissions. See [CI pipelines](docs/ci-pipelines.md) for configuration and least-privilege examples.
 
+## Policy & Posture
+
+Agent `v0.1.42` adds read-only workload security configuration, standard Kubernetes
+NetworkPolicy coverage, and native admission, Kyverno, Gatekeeper, and Kubewarden
+policy/report summaries. Open **Security & Config -> Policy & Posture** in KUBI.
+The feature is included in both plans and does not change operational Cluster Health.
+
+No policy engine is executed and no image scanner or registry connection is started.
+Missing APIs and denied permissions remain explicit coverage gaps, not successful
+checks. Provider evaluation time is distinct from the inventory fetch time.
+Installed CRDs alone do not prove controller health or enforcement.
+
+See [Policy & Posture](docs/policy-posture.md) for API groups, least-privilege read
+permissions, collection limits, and interpretation. Runtime API v2 remains compatible;
+use an in-place update rather than revoking and pairing the agent again.
+
 ## Prometheus Metrics
 
 The optional metrics exporter is disabled and loopback-only by default. It exposes bounded agent and cluster health metrics for customer-owned Prometheus, VictoriaMetrics, or Grafana dashboards. It is separate from the local runtime API and cannot proxy arbitrary KUBI requests.
@@ -134,6 +150,7 @@ kubi-agent rotate
 - [Installation and flags](docs/installation.md)
 - [Configuration and gateway kubeconfigs](docs/configuration.md)
 - [Kubernetes RBAC](docs/rbac.md)
+- [Policy & Posture](docs/policy-posture.md)
 - [Security model](docs/security.md)
 - [Troubleshooting](docs/troubleshooting.md)
 - [Prometheus metrics](docs/prometheus-metrics.md)
@@ -152,4 +169,4 @@ npm test
 
 The source package is ESM and targets Node.js 22+. Never commit kubeconfigs, pairing identities, provider tokens, private keys, or generated credential files.
 
-Agent `v0.1.41` prevents applied-resource snapshots and oversized annotation values from entering ConfigMap inventory. `kubectl.kubernetes.io/last-applied-configuration` is always omitted, other annotation values are capped at 1 KiB, and runtime API compatibility remains v2.
+Agent `v0.1.42` adds bounded Policy & Posture collection while preserving runtime API v2 compatibility. Existing ConfigMap metadata safeguards remain in place: applied-resource snapshots are omitted and other annotation values are capped at 1 KiB.

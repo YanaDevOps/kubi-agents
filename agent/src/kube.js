@@ -8,6 +8,8 @@ import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { parse as parseYaml } from 'yaml';
 import { detectProviderMetadata } from '../../src/shared/provider-detection.js';
+import { collectPolicyPosture } from '../../src/shared/policy-posture.js';
+import { POLICY_PROVIDER_DEFINITIONS, matchesPolicyControllerWorkload } from '../../src/shared/policy-posture-providers.js';
 import {
   BACKUP_RESOURCE_DEFINITIONS,
   buildUniversalBackupActivitySummary
@@ -63,6 +65,7 @@ const MAX_PAGES = 10;
 export const VALIDATED_KUBECONFIG_CACHE_TTL_MS = 2_000;
 const PRIVATE_HOST_PATTERNS = ['.local', '.internal', '.cluster.local'];
 const validatedKubeConfigCache = new Map();
+const policyPostureRequests = new WeakMap();
 function sanitizeKubeError(error) {
   if (error instanceof Error && error.message) {
     return error.message;
@@ -91,27 +94,66 @@ function requestKubeApi(url, requestOptions) {
   if (!transport) {
     throw new Error(`Unsupported Kubernetes API protocol: ${url.protocol}`);
   }
+  const { maxBytes, ...httpOptions } = requestOptions;
+  if (maxBytes !== undefined && (!Number.isSafeInteger(maxBytes) || maxBytes < 0)) {
+    throw new TypeError('Kubernetes response byte limit must be a non-negative safe integer.');
+  }
+  requestOptions.signal?.throwIfAborted();
 
   return new Promise((resolve, reject) => {
+    const chunks = [];
+    let bytes = 0;
+    let settled = false;
+    let incoming;
+    const fail = (error) => {
+      if (settled) return;
+      settled = true;
+      chunks.length = 0;
+      incoming?.destroy();
+      request.destroy();
+      reject(error);
+    };
     const request = transport.request(url, {
-      ...requestOptions,
+      ...httpOptions,
       headers: nodeHeaders(requestOptions.headers)
     }, (response) => {
-      const chunks = [];
-      response.on('data', (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
-      response.on('end', () => resolve({
-        status: response.statusCode ?? 0,
-        body: Buffer.concat(chunks).toString('utf8')
-      }));
+      incoming = response;
+      response.on('error', fail);
+      response.on('aborted', () => fail(new Error('Kubernetes API response was truncated.')));
+      response.on('close', () => {
+        if (!response.complete) fail(new Error('Kubernetes API response was truncated.'));
+      });
+      response.on('data', (chunk) => {
+        if (settled) return;
+        const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        if (maxBytes !== undefined && buffer.length > maxBytes - bytes) {
+          fail(new Error('Kubernetes API response exceeded the byte limit.'));
+          return;
+        }
+        bytes += buffer.length;
+        chunks.push(buffer);
+      });
+      response.on('end', () => {
+        if (settled) return;
+        if (!response.complete) {
+          fail(new Error('Kubernetes API response was truncated.'));
+          return;
+        }
+        settled = true;
+        const body = Buffer.concat(chunks).toString('utf8');
+        chunks.length = 0;
+        resolve({ status: response.statusCode ?? 0, body });
+      });
     });
     request.setTimeout(Number(requestOptions.timeout) || 10000);
     request.on('timeout', () => request.destroy(new Error('Kubernetes API request timed out.')));
-    request.on('error', reject);
+    request.on('error', fail);
     request.end();
   });
 }
 
 export async function fetchKubeJson(kubeConfig, pathWithQuery, options = {}) {
+  options.signal?.throwIfAborted();
   const url = new URL(pathWithQuery, baseServerUrl(kubeConfig));
   const requestOptions = await kubeConfig.applyToFetchOptions({
     method: 'GET',
@@ -122,6 +164,8 @@ export async function fetchKubeJson(kubeConfig, pathWithQuery, options = {}) {
 
   const response = await requestKubeApi(url, {
     ...requestOptions,
+    ...(options.signal ? { signal: options.signal } : {}),
+    ...(options.maxBytes !== undefined ? { maxBytes: options.maxBytes } : {}),
     ...(Number(options.timeoutMs) > 0 ? { timeout: Number(options.timeoutMs) } : {})
   });
   if (response.status < 200 || response.status >= 300) {
@@ -130,6 +174,7 @@ export async function fetchKubeJson(kubeConfig, pathWithQuery, options = {}) {
   try {
     return JSON.parse(response.body);
   } catch {
+    if (options.maxBytes !== undefined) throw new Error('Kubernetes API returned invalid JSON.');
     return {};
   }
 }
@@ -3183,6 +3228,29 @@ export async function loadLocalImageRisk(runtimeConfig, namespaceScope = null) {
   }
 }
 
+/**
+ * @param {object} runtimeConfig
+ * @param {string | null} [namespaceScope]
+ * @param {{ forceRefresh?: boolean }} [options]
+ */
+export async function loadLocalPolicyPosture(runtimeConfig, namespaceScope = null, options = {}) {
+  const kubeConfig = loadLocalKubeConfig(runtimeConfig);
+  // Keep transport identity isolated by validated kubeconfig, including different
+  // credentials for the same cluster. No posture results are cached here.
+  let request = policyPostureRequests.get(kubeConfig);
+  if (!request) {
+    request = async (path, options) => fetchKubeJson(kubeConfig, path, { ...options, timeoutMs: 5_000 });
+    policyPostureRequests.set(kubeConfig, request);
+  }
+  return collectPolicyPosture({
+    request,
+    // A kubeconfig default namespace is not an authorization boundary. "All"
+    // means every namespace accessible to these credentials, not that default.
+    namespace: namespaceScope && namespaceScope !== 'all' ? namespaceScope : undefined,
+    forceRefresh: options.forceRefresh === true
+  });
+}
+
 export async function loadLocalRbac(runtimeConfig, namespaceScope = null) {
   try {
     const kubeConfig = loadLocalKubeConfig(runtimeConfig);
@@ -5899,6 +5967,15 @@ export async function loadLocalComponentInventory(runtimeConfig) {
           ...matchDaemonSetEvidence(daemonSets, (_meta, record) => workloadContains(record, ['hashicorp/vault', 'vault-agent']))
         ]
       ),
+      ...POLICY_PROVIDER_DEFINITIONS.map((provider) => componentSummary(
+        provider.id, provider.name, 'security', `${provider.name} controller workload or policy CRD evidence; policy bodies are not collected here.`,
+        [
+          ...matchDeploymentEvidence(deployments, (_meta, record) => matchesPolicyControllerWorkload(record, provider)),
+          ...matchStatefulSetEvidence(statefulSets, (record) => matchesPolicyControllerWorkload(record, provider)),
+          ...matchDaemonSetEvidence(daemonSets, (_meta, record) => matchesPolicyControllerWorkload(record, provider)),
+          ...matchCrdEvidence(crds, (record) => provider.groups.includes(stringOrUndefined(asRecord(record.spec)?.group)))
+        ]
+      )),
       componentSummary(
         'vault-secrets-operator',
         'Vault Secrets Operator',
