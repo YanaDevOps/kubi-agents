@@ -6,10 +6,16 @@
     "agent": "node agent/src/cli.js",
     "build": "bun build agent/src/cli.js --compile --outfile dist/kubi-agent",
     "build:linux-amd64": "bun build agent/src/cli.js --compile --target=bun-linux-x64 --outfile dist/kubi-agent-linux-amd64",
-    "check": "node --check agent/src/cli.js && node --check agent/src/config.js && node --check agent/src/control-plane.js && node --check agent/src/kube.js && node --check agent/src/metrics-exporter.js && node --check agent/src/server.js && node --check agent/src/storage-drivers.js && node --check agent/src/storage-provider-adapters.js && node --check agent/src/alerting.js && node --check agent/src/logger.js && node --check agent/src/relay.js && node --check agent/src/task-runner.js && node --check agent/src/ci/http.js && node --check agent/src/ci/index.js && node --check agent/src/ci/github-actions.js && node --check agent/src/ci/gitlab-ci.js && node --check agent/src/ci/jenkins.js",
+    "check": "node --check agent/src/cli.js && node --check agent/src/config.js && node --check agent/src/control-plane.js && node --check agent/src/kube.js && node --check agent/src/cloud-autoscaling.js && node --check agent/src/metrics-exporter.js && node --check agent/src/server.js && node --check agent/src/storage-drivers.js && node --check agent/src/storage-provider-adapters.js && node --check agent/src/alerting.js && node --check agent/src/logger.js && node --check agent/src/relay.js && node --check agent/src/task-runner.js && node --check agent/src/ci/http.js && node --check agent/src/ci/index.js && node --check agent/src/ci/github-actions.js && node --check agent/src/ci/gitlab-ci.js && node --check agent/src/ci/jenkins.js",
     "test": "bun test --max-concurrency=1 tests/*.test.js"
   },
   "dependencies": {
+    "@aws-sdk/client-eks": "^3.883.0",
+    "@aws-sdk/credential-providers": "^3.883.0",
+    "@azure/arm-containerservice": "^21.3.0",
+    "@azure/identity": "^4.11.1",
+    "@google-cloud/compute": "^5.3.0",
+    "@google-cloud/container": "^6.3.0",
     "@kubernetes/client-node": "^1.4.0",
     "cron-parser": "5.4.0",
     "ws": "^8.21.1",

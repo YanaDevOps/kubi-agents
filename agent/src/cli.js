@@ -22,6 +22,7 @@ const DEFAULT_CAPABILITIES = {
   availableAuthKinds: ['unknown', 'token', 'client-cert', 'exec'],
   runtimeApiVersion: LOCAL_AGENT_RUNTIME_API_VERSION,
   policyPosture: true,
+  autoscalingCapacity: true,
   buildId: AGENT_BUILD_ID
 };
 const RUNNING_RELEASE = {

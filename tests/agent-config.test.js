@@ -68,6 +68,11 @@ discovery:
         githubActions: { enabled: false, instances: [] },
         gitlabCi: { enabled: false, instances: [] },
         jenkins: { enabled: false, instances: [] }
+      },
+      cloudAutoscaling: {
+        aws: { enabled: false, profiles: [] },
+        gcp: { enabled: false, profiles: [] },
+        azure: { enabled: false, profiles: [] }
       }
     });
     expect(resolveAgentRuntimeConfig({ controlPlaneUrl: 'https://old.invalid', agentId: 'a', agentSecret: 's' })).toMatchObject({
@@ -291,4 +296,40 @@ discovery:
     expect(log).not.toContain('one-time');
     expect(log).not.toContain('runtime-token');
   }));
+
+  test('keeps cloud node adapters opt-in and validates profile credentials', () => {
+    const validated = validateAgentSettings({
+      autoscaling: {
+        cloud: {
+          aws: {
+            enabled: true,
+            profiles: [{
+              id: 'prod',
+              context: 'production',
+              cluster_name: 'main',
+              region: 'eu-central-1',
+              credentials_file: '/secure/aws'
+            }]
+          }
+        }
+      }
+    });
+    expect(validated.cloudAutoscaling.aws.profiles[0]).toMatchObject({
+      id: 'prod',
+      context: 'production',
+      clusterName: 'main',
+      region: 'eu-central-1',
+      credentialsFile: '/secure/aws'
+    });
+    expect(JSON.stringify(redactAgentRuntimeConfig({
+      agentSecret: 'secret',
+      cloudAutoscaling: validated.cloudAutoscaling
+    }))).not.toContain('/secure/aws');
+    expect(() => validateAgentSettings({
+      autoscaling: { cloud: { gcp: { enabled: true, profiles: [{ id: 'bad', project_id: 'p' }] } } }
+    })).toThrow('location is required');
+    expect(() => validateAgentSettings({
+      autoscaling: { cloud: { azure: { enabled: true, profiles: [{ id: 'bad', subscription_id: 's', resource_group: 'r', cluster_name: 'c', tenant_id_file: '/tenant' }] } } }
+    })).toThrow('must be configured together');
+  });
 });

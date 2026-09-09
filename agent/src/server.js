@@ -13,6 +13,7 @@ import {
   loadLocalGhostResources,
   loadLocalImageRisk,
   loadLocalPolicyPosture,
+  loadLocalAutoscaling,
   loadLocalJobs,
   loadLocalJobLogs,
   loadLocalMetrics,
@@ -230,6 +231,7 @@ export function createAgentLoopbackServer(options) {
   const ghostResourcesProvider = options.ghostResourcesProvider || loadLocalGhostResources;
   const imageRiskProvider = options.imageRiskProvider || loadLocalImageRisk;
   const policyPostureProvider = options.policyPostureProvider || loadLocalPolicyPosture;
+  const autoscalingProvider = options.autoscalingProvider || loadLocalAutoscaling;
   const rbacProvider = options.rbacProvider || loadLocalRbac;
   const portsProvider = options.portsProvider || loadLocalPorts;
   const trafficProvider = options.trafficProvider || loadLocalTraffic;
@@ -546,6 +548,7 @@ export function createAgentLoopbackServer(options) {
           agentVersion: runtimeConfig.version || 'unknown',
           runtimeApiVersion: runtimeConfig.runtimeApiVersion || undefined,
           policyPosture: true,
+          autoscalingCapacity: true,
           buildId: runtimeConfig.buildId || undefined,
           expiresAt: introspection.expiresAt,
           scopes: introspection.scopes
@@ -873,6 +876,28 @@ export function createAgentLoopbackServer(options) {
         return {
           status: 200,
           payload: introspection.mcpAccess ? summarizePolicyPostureForMCP(payload) : payload,
+          headers: responseCorsHeaders
+        };
+      }
+
+      if (url.pathname === '/v1/autoscaling') {
+        const namespace = url.searchParams.get('ns');
+        const view = url.searchParams.get('view') || 'full';
+        if (namespace && namespace !== 'all' && (namespace.length > 63 || !/^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/.test(namespace))) {
+          return { status: 400, payload: { message: 'Invalid Kubernetes namespace.' }, headers: responseCorsHeaders };
+        }
+        if (!Array.isArray(introspection.scopes) || !introspection.scopes.includes('runtime:read')) {
+          return { status: 403, payload: { message: 'A runtime read scope is required.' }, headers: responseCorsHeaders };
+        }
+        if (!['summary', 'hpa', 'vpa', 'keda', 'pdb', 'capacity', 'node-scaling', 'full'].includes(view)) {
+          return { status: 400, payload: { message: 'Invalid autoscaling view.' }, headers: responseCorsHeaders };
+        }
+        return {
+          status: 200,
+          payload: await autoscalingProvider(runtimeConfig, namespace === 'all' ? null : namespace, {
+            view,
+            forceRefresh: url.searchParams.get('forceRefresh') === 'true'
+          }),
           headers: responseCorsHeaders
         };
       }

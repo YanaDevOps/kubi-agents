@@ -151,6 +151,7 @@ kubi-agent rotate
 - [Configuration and gateway kubeconfigs](docs/configuration.md)
 - [Kubernetes RBAC](docs/rbac.md)
 - [Policy & Posture](docs/policy-posture.md)
+- [Autoscaling & Capacity](docs/autoscaling-capacity.md)
 - [Security model](docs/security.md)
 - [Troubleshooting](docs/troubleshooting.md)
 - [Prometheus metrics](docs/prometheus-metrics.md)
@@ -169,4 +170,4 @@ npm test
 
 The source package is ESM and targets Node.js 22+. Never commit kubeconfigs, pairing identities, provider tokens, private keys, or generated credential files.
 
-Agent `v0.1.42` adds bounded Policy & Posture collection while preserving runtime API v2 compatibility. Existing ConfigMap metadata safeguards remain in place: applied-resource snapshots are omitted and other annotation values are capped at 1 KiB.
+Agent `v0.1.43` adds optional read-only Autoscaling & Capacity collection: HPA, VPA, KEDA, PDB, ResourceQuota, LimitRange, scheduler capacity, Karpenter, Cluster Autoscaler, and opt-in cloud node-pool inventory. Cloud adapters run only on the customer host and remain disabled by default. Runtime API v2 compatibility is preserved.

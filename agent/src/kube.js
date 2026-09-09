@@ -9,6 +9,8 @@ import { isDeepStrictEqual } from 'node:util';
 import { parse as parseYaml } from 'yaml';
 import { detectProviderMetadata } from '../../src/shared/provider-detection.js';
 import { collectPolicyPosture } from '../../src/shared/policy-posture.js';
+import { collectAutoscalingCapacity } from '../../src/shared/autoscaling-capacity.js';
+import { loadCloudAutoscaling } from './cloud-autoscaling.js';
 import { POLICY_PROVIDER_DEFINITIONS, matchesPolicyControllerWorkload } from '../../src/shared/policy-posture-providers.js';
 import {
   BACKUP_RESOURCE_DEFINITIONS,
@@ -66,6 +68,7 @@ export const VALIDATED_KUBECONFIG_CACHE_TTL_MS = 2_000;
 const PRIVATE_HOST_PATTERNS = ['.local', '.internal', '.cluster.local'];
 const validatedKubeConfigCache = new Map();
 const policyPostureRequests = new WeakMap();
+const autoscalingRequests = new WeakMap();
 function sanitizeKubeError(error) {
   if (error instanceof Error && error.message) {
     return error.message;
@@ -3251,6 +3254,25 @@ export async function loadLocalPolicyPosture(runtimeConfig, namespaceScope = nul
   });
 }
 
+export async function loadLocalAutoscaling(runtimeConfig, namespaceScope = null, options = {}) {
+  const kubeConfig = loadLocalKubeConfig(runtimeConfig);
+  let request = autoscalingRequests.get(kubeConfig);
+  if (!request) {
+    request = async (path, settings) => fetchKubeJson(kubeConfig, path, {
+      ...settings,
+      timeoutMs: 5_000
+    });
+    autoscalingRequests.set(kubeConfig, request);
+  }
+  return collectAutoscalingCapacity({
+    request,
+    namespace: namespaceScope && namespaceScope !== 'all' ? namespaceScope : undefined,
+    view: options.view || 'full',
+    forceRefresh: options.forceRefresh === true,
+    cloudProvider: options.cloudProvider || (() => loadCloudAutoscaling(runtimeConfig))
+  });
+}
+
 export async function loadLocalRbac(runtimeConfig, namespaceScope = null) {
   try {
     const kubeConfig = loadLocalKubeConfig(runtimeConfig);
@@ -6023,6 +6045,21 @@ export async function loadLocalComponentInventory(runtimeConfig) {
         'external-dns evidence from controller workloads.',
         [...matchDeploymentEvidence(deployments, (meta) => meta.name === 'external-dns')]
       ),
+      componentSummary('keda', 'KEDA', 'autoscaling', 'Event-driven workload autoscaling.', [
+        ...matchDeploymentEvidence(deployments, (meta, record) => /keda-operator|keda-metrics-apiserver/i.test(meta.name) || workloadContains(record, ['kedacore/keda'])),
+        ...matchCrdEvidence(crds, (record) => stringOrUndefined(asRecord(record.spec)?.group) === 'keda.sh')
+      ]),
+      componentSummary('vpa', 'Vertical Pod Autoscaler', 'autoscaling', 'Resource recommendation and vertical scaling controls.', [
+        ...matchDeploymentEvidence(deployments, (meta) => /vpa-(recommender|updater|admission-controller)/i.test(meta.name)),
+        ...matchCrdEvidence(crds, (record) => stringOrUndefined(asRecord(record.spec)?.group) === 'autoscaling.k8s.io')
+      ]),
+      componentSummary('karpenter', 'Karpenter', 'autoscaling', 'Node provisioning and disruption controls.', [
+        ...matchDeploymentEvidence(deployments, (meta, record) => /karpenter/i.test(meta.name) || workloadContains(record, ['karpenter/controller'])),
+        ...matchCrdEvidence(crds, (record) => ['karpenter.sh', 'karpenter.k8s.aws'].includes(stringOrUndefined(asRecord(record.spec)?.group)))
+      ]),
+      componentSummary('cluster-autoscaler', 'Cluster Autoscaler', 'autoscaling', 'Node group autoscaling controller.', [
+        ...matchDeploymentEvidence(deployments, (meta, record) => /cluster-autoscaler/i.test(meta.name) || workloadContains(record, ['cluster-autoscaler']))
+      ]),
       componentSummary(
         'gateway-api',
         'Gateway API',
@@ -6145,6 +6182,7 @@ export async function loadLocalComponentInventory(runtimeConfig) {
       observability: items.filter((item) => item.category === 'observability').length,
       security: items.filter((item) => item.category === 'security').length,
       gateway: items.filter((item) => item.category === 'gateway').length,
+      autoscaling: items.filter((item) => item.category === 'autoscaling').length,
       'continuous-delivery': items.filter((item) => item.category === 'continuous-delivery').length
     };
 

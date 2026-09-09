@@ -424,6 +424,75 @@ function normalizeCiInstances(settings) {
   };
 }
 
+function normalizeCloudAutoscaling(settings) {
+  const autoscaling = object(settings.autoscaling, 'autoscaling');
+  const cloud = object(autoscaling.cloud, 'autoscaling.cloud');
+  const normalizeProfiles = (provider, normalize) => {
+    const config = object(cloud[provider], `autoscaling.cloud.${provider}`);
+    if (config.profiles !== undefined && !Array.isArray(config.profiles)) {
+      throw new Error(`autoscaling.cloud.${provider}.profiles must be a list.`);
+    }
+    const profiles = (config.profiles || []).map((raw, index) => {
+      const field = `autoscaling.cloud.${provider}.profiles[${index}]`;
+      const profile = object(raw, field);
+      const common = {
+        id: optionalString(profile.id, `${field}.id`),
+        context: optionalString(profile.context, `${field}.context`, '*') || '*',
+        clusterFingerprint: optionalString(profile.cluster_fingerprint, `${field}.cluster_fingerprint`) || undefined,
+        timeoutSeconds: boundedNumber(profile.timeout_seconds, `${field}.timeout_seconds`, 8, 2, 30)
+      };
+      if (!common.id) throw new Error(`${field}.id is required.`);
+      return { ...common, ...normalize(profile, field) };
+    });
+    if (new Set(profiles.map((profile) => profile.id)).size !== profiles.length) {
+      throw new Error(`autoscaling.cloud.${provider}.profiles must have unique ids.`);
+    }
+    return { enabled: optionalBoolean(config.enabled, `autoscaling.cloud.${provider}.enabled`, false), profiles };
+  };
+  const normalized = {
+    aws: normalizeProfiles('aws', (profile, field) => ({
+      clusterName: optionalString(profile.cluster_name, `${field}.cluster_name`),
+      region: optionalString(profile.region, `${field}.region`),
+      profile: optionalString(profile.profile, `${field}.profile`) || undefined,
+      credentialsFile: optionalString(profile.credentials_file, `${field}.credentials_file`) || undefined
+    })),
+    gcp: normalizeProfiles('gcp', (profile, field) => ({
+      projectId: optionalString(profile.project_id, `${field}.project_id`),
+      location: optionalString(profile.location, `${field}.location`),
+      clusterName: optionalString(profile.cluster_name, `${field}.cluster_name`),
+      credentialsFile: optionalString(profile.credentials_file, `${field}.credentials_file`) || undefined
+    })),
+    azure: normalizeProfiles('azure', (profile, field) => ({
+      subscriptionId: optionalString(profile.subscription_id, `${field}.subscription_id`),
+      resourceGroup: optionalString(profile.resource_group, `${field}.resource_group`),
+      clusterName: optionalString(profile.cluster_name, `${field}.cluster_name`),
+      tenantIdFile: optionalString(profile.tenant_id_file, `${field}.tenant_id_file`) || undefined,
+      clientIdFile: optionalString(profile.client_id_file, `${field}.client_id_file`) || undefined,
+      clientSecretFile: optionalString(profile.client_secret_file, `${field}.client_secret_file`) || undefined
+    }))
+  };
+  const required = {
+    aws: ['clusterName', 'region'],
+    gcp: ['projectId', 'location', 'clusterName'],
+    azure: ['subscriptionId', 'resourceGroup', 'clusterName']
+  };
+  for (const [provider, config] of Object.entries(normalized)) {
+    for (const [index, profile] of config.profiles.entries()) {
+      const field = `autoscaling.cloud.${provider}.profiles[${index}]`;
+      for (const key of required[provider]) {
+        if (!profile[key]) throw new Error(`${field}.${key} is required.`);
+      }
+      if (provider === 'azure') {
+        const clientCredentials = [profile.tenantIdFile, profile.clientIdFile, profile.clientSecretFile];
+        if (clientCredentials.some(Boolean) && !clientCredentials.every(Boolean)) {
+          throw new Error(`${field}.tenant_id_file, client_id_file and client_secret_file must be configured together.`);
+        }
+      }
+    }
+  }
+  return normalized;
+}
+
 export function validateAgentSettings(settings) {
   const discovery = settings.discovery && typeof settings.discovery === 'object' ? settings.discovery : {};
   const logging = settings.logging && typeof settings.logging === 'object' ? settings.logging : {};
@@ -442,11 +511,13 @@ export function validateAgentSettings(settings) {
   const storageDrivers = normalizeStorageDrivers(settings);
   const metricsExporter = normalizeMetricsExporter(settings);
   const ci = normalizeCiInstances(settings);
+  const cloudAutoscaling = normalizeCloudAutoscaling(settings);
   return {
     kubeconfigPaths,
     kubeconfigDirectories,
     metricsExporter,
     ci,
+    cloudAutoscaling,
     ...(storageDrivers ? { storageDrivers } : {})
   };
 }
@@ -491,7 +562,8 @@ export function resolveAgentRuntimeConfig(config, runningRelease = {}) {
     logging: settings.logging && typeof settings.logging === 'object' ? settings.logging : {},
     metricsExporter: validated.metricsExporter,
     storageDrivers: validated.storageDrivers || {},
-    ci: validated.ci
+    ci: validated.ci,
+    cloudAutoscaling: validated.cloudAutoscaling
   };
 }
 
@@ -526,6 +598,13 @@ export function redactAgentRuntimeConfig(runtimeConfig) {
       if (instance.tls?.caFile) instance.tls.caFile = '[redacted]';
       if (instance.tls?.clientCertFile) instance.tls.clientCertFile = '[redacted]';
       if (instance.tls?.clientKeyFile) instance.tls.clientKeyFile = '[redacted]';
+    }
+  }
+  for (const provider of ['aws', 'gcp', 'azure']) {
+    for (const profile of clone.cloudAutoscaling?.[provider]?.profiles || []) {
+      for (const key of ['credentialsFile', 'tenantIdFile', 'clientIdFile', 'clientSecretFile']) {
+        if (profile[key]) profile[key] = '[redacted]';
+      }
     }
   }
   return clone;
