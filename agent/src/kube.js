@@ -108,9 +108,12 @@ function requestKubeApi(url, requestOptions) {
     let bytes = 0;
     let settled = false;
     let incoming;
+    const onAbort = () => fail(requestOptions.signal.reason || new Error('Kubernetes API request was cancelled.'));
+    const cleanup = () => requestOptions.signal?.removeEventListener('abort', onAbort);
     const fail = (error) => {
       if (settled) return;
       settled = true;
+      cleanup();
       chunks.length = 0;
       incoming?.destroy();
       request.destroy();
@@ -143,6 +146,7 @@ function requestKubeApi(url, requestOptions) {
           return;
         }
         settled = true;
+        cleanup();
         const body = Buffer.concat(chunks).toString('utf8');
         chunks.length = 0;
         resolve({ status: response.statusCode ?? 0, body });
@@ -151,6 +155,8 @@ function requestKubeApi(url, requestOptions) {
     request.setTimeout(Number(requestOptions.timeout) || 10000);
     request.on('timeout', () => request.destroy(new Error('Kubernetes API request timed out.')));
     request.on('error', fail);
+    requestOptions.signal?.addEventListener('abort', onAbort, { once: true });
+    if (requestOptions.signal?.aborted) onAbort();
     request.end();
   });
 }
@@ -3683,42 +3689,8 @@ export function isReliablePVCUsageSample(sample, declaredCapacityBytes) {
   return sample.usedBytes <= declaredCapacityBytes * 1.05;
 }
 
-async function loadPVCUsage(kubeConfig) {
-  let nodes;
-  let pods = [];
-  let podInventoryAvailable = false;
-  try {
-    const requests = await Promise.allSettled([
-      fetchKubeList(kubeConfig, '/api/v1/nodes'),
-      fetchKubeList(kubeConfig, '/api/v1/pods')
-    ]);
-    if (requests[0].status === 'rejected') throw requests[0].reason;
-    nodes = requests[0].value;
-    pods = requests[1].status === 'fulfilled' ? asRecordArray(requests[1].value.items) : [];
-    podInventoryAvailable = requests[1].status === 'fulfilled';
-  } catch (error) {
-    const message = sanitizeKubeError(error);
-    return {
-      usage: new Map(),
-      mountedByPods: new Map(),
-      status: {
-        available: false,
-        partial: false,
-        missingPermissions: message.includes('HTTP 403') ? ['nodes/proxy'] : [],
-        sampledNodes: 0,
-        failedNodes: 0,
-        rawSamples: 0,
-        usableSamples: 0,
-        mountedClaims: 0,
-        podInventoryAvailable: false,
-        message: message.includes('HTTP 403')
-          ? 'PVC usage requires read access to the nodes/proxy subresource.'
-          : 'PVC usage could not be sampled from cluster nodes.'
-      }
-    };
-  }
-
-  const nodeNames = asRecordArray(nodes.items).map((node) => metadataFor(node).name).filter(Boolean);
+async function loadPVCUsage(kubeConfig, { nodes, pods, nodesAvailable, podInventoryAvailable }, timeoutMs = 2_000) {
+  const nodeNames = asRecordArray(nodes).map((node) => metadataFor(node).name).filter(Boolean);
   const podVolumeClaims = new Map();
   const mountedByPods = new Map();
   for (const pod of pods) {
@@ -3743,27 +3715,36 @@ async function loadPVCUsage(kubeConfig) {
   let sampledNodes = 0;
   let failedNodes = 0;
   let permissionDenied = false;
-  for (let offset = 0; offset < nodeNames.length; offset += 4) {
-    const batch = nodeNames.slice(offset, offset + 4);
-    const results = await Promise.allSettled(
-      batch.map((name) => fetchKubeJson(kubeConfig, `/api/v1/nodes/${encodeURIComponent(name)}/proxy/stats/summary`))
-    );
-    results.forEach((result) => {
-      if (result.status === 'rejected') {
-        failedNodes += 1;
-        permissionDenied ||= String(result.reason?.message || result.reason).includes('HTTP 403');
-        return;
-      }
-      sampledNodes += 1;
-      for (const [key, value] of parseNodeSummaryPVCUsage(result.value, podVolumeClaims)) {
-        const current = usage.get(key);
-        if (!current || value.usedBytes > current.usedBytes) usage.set(key, value);
-      }
-    });
+  const controller = new AbortController();
+  const budgetMs = Math.max(1, Math.min(2_000, Number(timeoutMs) || 2_000));
+  // One deadline for all node batches, including credential resolution and slow bodies.
+  const timer = setTimeout(() => controller.abort(new Error('PVC usage sampling budget exceeded.')), budgetMs);
+  try {
+    for (let offset = 0; offset < nodeNames.length && !controller.signal.aborted; offset += 4) {
+      const batch = nodeNames.slice(offset, offset + 4);
+      const results = await Promise.allSettled(
+        batch.map((name) => fetchKubeJson(kubeConfig, `/api/v1/nodes/${encodeURIComponent(name)}/proxy/stats/summary`, { signal: controller.signal, timeoutMs: budgetMs }))
+      );
+      results.forEach((result) => {
+        if (result.status === 'rejected') {
+          failedNodes += 1;
+          permissionDenied ||= String(result.reason?.message || result.reason).includes('HTTP 403');
+          return;
+        }
+        sampledNodes += 1;
+        for (const [key, value] of parseNodeSummaryPVCUsage(result.value, podVolumeClaims)) {
+          const current = usage.get(key);
+          if (!current || value.usedBytes > current.usedBytes) usage.set(key, value);
+        }
+      });
+    }
+  } finally {
+    clearTimeout(timer);
   }
 
   const available = sampledNodes > 0;
-  const partial = available && failedNodes > 0;
+  if (controller.signal.aborted) failedNodes = nodeNames.length - sampledNodes;
+  const partial = !nodesAvailable || failedNodes > 0;
   return {
     usage,
     mountedByPods,
@@ -3777,7 +3758,11 @@ async function loadPVCUsage(kubeConfig) {
       usableSamples: 0,
       mountedClaims: mountedByPods.size,
       podInventoryAvailable,
-      message: available
+      message: controller.signal.aborted
+        ? `PVC usage sampling budget (${budgetMs}ms) was exhausted; ${sampledNodes}/${nodeNames.length} node(s) sampled. Volume inventory is available.`
+        : !nodesAvailable
+          ? 'PVC usage could not be sampled because Node inventory is unavailable.'
+          : available
         ? partial
           ? `PVC usage sampled from ${sampledNodes} node(s); ${failedNodes} node(s) were unavailable.`
           : `PVC usage sampled from ${sampledNodes} node(s).`
@@ -4197,7 +4182,7 @@ function dedupeServiceLinks(links) {
   });
 }
 
-export async function loadLocalStorage(runtimeConfig, namespaceScope = null) {
+export async function loadLocalStorage(runtimeConfig, namespaceScope = null, options = {}) {
   try {
     const kubeConfig = loadLocalKubeConfig(runtimeConfig);
     const effectiveNamespace = namespaceScope || runtimeConfig.namespace || null;
@@ -4306,7 +4291,12 @@ export async function loadLocalStorage(runtimeConfig, namespaceScope = null) {
       new Date().toISOString(),
       requests[7].status === 'fulfilled' ? requests[7].value.truncated : true
     );
-    const pvcUsage = await loadPVCUsage(kubeConfig);
+    const pvcUsage = await loadPVCUsage(kubeConfig, {
+      nodes: nodeItems,
+      pods: asRecordArray(podItems),
+      nodesAvailable: requests[4].status === 'fulfilled',
+      podInventoryAvailable: requests[8].status === 'fulfilled'
+    }, options.pvcUsageTimeoutMs);
     const usageObservedAt = new Date().toISOString();
     let validUsageCount = 0;
     let discardedSamples = 0;
@@ -4321,7 +4311,9 @@ export async function loadLocalStorage(runtimeConfig, namespaceScope = null) {
           mountedByPods: mounted,
           usageUnavailableReason: sample
             ? 'Kubelet reported filesystem capacity that does not match this PVC.'
-            : mounted.length
+            : pvcUsage.status.partial && !pvcUsage.status.sampledNodes
+              ? pvcUsage.status.message
+              : mounted.length
               ? 'Kubelet summary was reachable but exposed no usable filesystem sample for this mounted PVC.'
               : 'This PVC is not mounted by an active Pod, so kubelet does not report filesystem usage.'
         };
@@ -4349,7 +4341,7 @@ export async function loadLocalStorage(runtimeConfig, namespaceScope = null) {
       registrationAvailable: requests[5].status === 'fulfilled'
     });
     const usageAvailable = validUsageCount > 0;
-    const usagePartial = usageAvailable && (pvcUsage.status.failedNodes > 0 || discardedSamples > 0);
+    const usagePartial = pvcUsage.status.partial || discardedSamples > 0;
     const usageStatus = {
       ...pvcUsage.status,
       available: usageAvailable,

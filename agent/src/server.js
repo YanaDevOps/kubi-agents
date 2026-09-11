@@ -190,6 +190,7 @@ export function createAgentLoopbackServer(options) {
   const runtimeIntrospectionCache = new Map();
   const mcpIntrospectionCache = new Map();
   const discoveryIntrospectionCache = new Map();
+  const pendingIntrospection = new Map();
   const now = options.now || Date.now;
   const runtimeIntrospectionCacheTtlMs = options.runtimeIntrospectionCacheTtlMs ?? 2_000;
   const overviewProvider = options.overviewProvider || loadLocalClusterOverview;
@@ -267,36 +268,49 @@ export function createAgentLoopbackServer(options) {
       return null;
     }
 
-    const cached = runtimeIntrospectionCache.get(accessToken) || mcpIntrospectionCache.get(accessToken);
+    const isMcp = accessToken.startsWith('kubi_mcp_');
+    const cache = isMcp ? mcpIntrospectionCache : runtimeIntrospectionCache;
+    const cached = cache.get(accessToken);
     if (cached && cached.expiresAt > now()) {
       return cached.introspection;
     }
 
+    if (pendingIntrospection.has(accessToken)) return pendingIntrospection.get(accessToken);
+    const pending = (async () => {
+      const identity = {
+        controlPlaneUrl: options.runtimeConfig.controlPlaneUrl,
+        agentId: options.runtimeConfig.agentId,
+        agentSecret: options.runtimeConfig.agentSecret
+      };
+      let introspection;
+      if (isMcp) {
+        introspection = { ...await introspectMCPClient({ ...identity, mcpToken: accessToken }), mcpAccess: true };
+      } else {
+        try {
+          introspection = await introspectClient({ ...identity, accessToken });
+        } catch (error) {
+          // Preserve compatibility with pre-prefix MCP tokens, but never turn a
+          // control-plane timeout into a second remote request.
+          const message = error instanceof Error ? error.message.toLowerCase() : '';
+          if (/timeout|timed out|network|fetch failed|unreachable/.test(message)) throw error;
+          introspection = { ...await introspectMCPClient({ ...identity, mcpToken: accessToken }), mcpAccess: true };
+        }
+      }
+      const timestamp = now();
+      for (const [token, entry] of cache) if (entry.expiresAt <= timestamp) cache.delete(token);
+      if (cache.size >= 1000) cache.delete(cache.keys().next().value);
+      cache.set(accessToken, {
+        introspection,
+        expiresAt: isMcp ? timestamp + runtimeIntrospectionCacheTtlMs
+          : Math.min(Date.parse(introspection.expiresAt), timestamp + runtimeIntrospectionCacheTtlMs)
+      });
+      return introspection;
+    })();
+    pendingIntrospection.set(accessToken, pending);
     try {
-      const introspection = await introspectClient({
-        controlPlaneUrl: options.runtimeConfig.controlPlaneUrl,
-        agentId: options.runtimeConfig.agentId,
-        agentSecret: options.runtimeConfig.agentSecret,
-        accessToken
-      });
-      runtimeIntrospectionCache.set(accessToken, {
-        introspection,
-        expiresAt: Math.min(Date.parse(introspection.expiresAt), now() + runtimeIntrospectionCacheTtlMs)
-      });
-      return introspection;
-    } catch (runtimeError) {
-      const mcpIntrospection = await introspectMCPClient({
-        controlPlaneUrl: options.runtimeConfig.controlPlaneUrl,
-        agentId: options.runtimeConfig.agentId,
-        agentSecret: options.runtimeConfig.agentSecret,
-        mcpToken: accessToken
-      });
-      const introspection = { ...mcpIntrospection, mcpAccess: true };
-      mcpIntrospectionCache.set(accessToken, {
-        introspection,
-        expiresAt: now() + runtimeIntrospectionCacheTtlMs
-      });
-      return introspection;
+      return await pending;
+    } finally {
+      pendingIntrospection.delete(accessToken);
     }
   }
 
@@ -321,7 +335,7 @@ export function createAgentLoopbackServer(options) {
     return introspection;
   }
 
-  async function dispatch(request) {
+  async function dispatchRequest(request, timings) {
     if (!request.url) {
       return {
         status: 404,
@@ -416,6 +430,7 @@ export function createAgentLoopbackServer(options) {
     }
 
     let introspection;
+    const authorizationStartedAt = Date.now();
     try {
       introspection = await authorizeRuntime(request);
     } catch (error) {
@@ -426,6 +441,8 @@ export function createAgentLoopbackServer(options) {
         },
         headers: responseCorsHeaders
       };
+    } finally {
+      timings.authorizeMs = Date.now() - authorizationStartedAt;
     }
 
     if (!introspection) {
@@ -445,6 +462,7 @@ export function createAgentLoopbackServer(options) {
     }
 
     let runtimeConfig;
+    const selectorStartedAt = Date.now();
     try {
       runtimeConfig = (options.runtimeConfigResolver || resolveAgentRuntimeConfigForSelector)(
         options.runtimeConfig,
@@ -458,6 +476,8 @@ export function createAgentLoopbackServer(options) {
         },
         headers: responseCorsHeaders
       };
+    } finally {
+      timings.selectorMs = Date.now() - selectorStartedAt;
     }
 
     const hasManageScope = Array.isArray(introspection.scopes) && introspection.scopes.includes('runtime:manage');
@@ -966,6 +986,23 @@ export function createAgentLoopbackServer(options) {
       payload: { message: 'Not found.' },
       headers: responseCorsHeaders
     };
+  }
+
+  async function dispatch(request) {
+    const startedAt = Date.now();
+    const timings = { authorizeMs: 0, selectorMs: 0 };
+    const result = await dispatchRequest(request, timings);
+    const durationMs = Date.now() - startedAt;
+    const rawId = request.headers?.['x-kubi-request-id'];
+    options.onRuntimeRequest?.({
+      requestId: typeof rawId === 'string' && /^[a-zA-Z0-9-]{1,64}$/.test(rawId) ? rawId : 'local',
+      endpoint: new URL(request.url || '/', 'http://localhost').pathname,
+      status: result.status,
+      durationMs,
+      ...timings,
+      resourceMs: Math.max(0, durationMs - timings.authorizeMs - timings.selectorMs)
+    });
+    return result;
   }
 
   const server = http.createServer(async (request, response) => {

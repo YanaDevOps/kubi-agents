@@ -126,7 +126,12 @@ async function runAgent() {
 
   const server = createAgentLoopbackServer({
     runtimeConfig,
-    discoveryScanProvider: refreshDiscovery
+    discoveryScanProvider: refreshDiscovery,
+    onRuntimeRequest({ requestId, endpoint, status, durationMs, authorizeMs, selectorMs, resourceMs }) {
+      const message = `KUBI runtime request id=${requestId} path=${endpoint} status=${status} durationMs=${durationMs} authorizeMs=${authorizeMs} selectorMs=${selectorMs} resourceMs=${resourceMs}`;
+      if (durationMs >= 2_000 || status >= 500 || endpoint === '/v1/delivery-activity') logger.info(message);
+      else logger.debug(message);
+    }
   });
   await server.listen();
 
@@ -148,8 +153,7 @@ async function runAgent() {
     },
     onRequestComplete({ endpoint, status, durationMs }) {
       const message = `KUBI hosted relay request ${endpoint} completed with HTTP ${status || 'error'} in ${durationMs}ms.`;
-      if (endpoint === '/v1/delivery-activity' || durationMs >= 2_000 || status >= 500) logger.info(message);
-      else logger.debug(message);
+      logger.debug(message);
     }
   });
   relay.start();

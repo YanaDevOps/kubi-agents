@@ -78,7 +78,10 @@ export function createAgentRelayClient(options) {
       const endpoint = String(command.request?.url || '/v1').split('?')[0];
       const startedAt = Date.now();
       try {
-        const result = await options.dispatch(requestStream(command.request || {}));
+        const result = await options.dispatch(requestStream({
+          ...command.request,
+          headers: { ...command.request?.headers, 'x-kubi-request-id': message.requestId }
+        }));
         options.onRequestComplete?.({ endpoint, status: Number(result?.status) || 0, durationMs: Date.now() - startedAt });
         if (Number(result?.status) >= 500) {
           const message = typeof result?.payload?.message === 'string' ? result.payload.message : `HTTP ${result.status}`;
