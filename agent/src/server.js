@@ -218,6 +218,7 @@ export function createAgentLoopbackServer(options) {
   const jobsProvider = options.jobsProvider || loadLocalJobs;
   const jobLogsProvider = options.jobLogsProvider || loadLocalJobLogs;
   const metricsProvider = options.metricsProvider || loadLocalMetrics;
+  const timelineProvider = options.timelineProvider;
   const backupActivityProvider = options.backupActivityProvider || loadLocalBackupActivity;
   const alertingSummaryProvider = options.alertingSummaryProvider || loadAlertingSummary;
   const alertingConfigProvider = options.alertingConfigProvider || loadAlertingConfig;
@@ -575,6 +576,34 @@ export function createAgentLoopbackServer(options) {
         },
         headers: responseCorsHeaders
       };
+    }
+
+    if (url.pathname === '/v1/timeline' || url.pathname === '/v1/timeline/status' || url.pathname.startsWith('/v1/timeline/events/')) {
+      if (!timelineProvider) {
+        return { status: 501, payload: { message: 'Cluster Timeline is not available in this agent build.' }, headers: responseCorsHeaders };
+      }
+      const target = {
+        workspaceId: introspection.workspaceId,
+        connectionId: introspection.connectionId,
+        agentId: introspection.agentId,
+        connectionSelector: introspection.connectionSelector
+      };
+      try {
+        if (url.pathname === '/v1/timeline/status') {
+          return { status: 200, payload: await timelineProvider.status(target), headers: responseCorsHeaders };
+        }
+        if (url.pathname.startsWith('/v1/timeline/events/')) {
+          const id = decodeURIComponent(url.pathname.slice('/v1/timeline/events/'.length));
+          const event = await timelineProvider.detail(target, id);
+          return event ? { status: 200, payload: event, headers: responseCorsHeaders } : { status: 404, payload: { message: 'Timeline event not found.' }, headers: responseCorsHeaders };
+        }
+        const allowed = new Set(['from', 'to', 'namespace', 'includeCluster', 'severity', 'category', 'search', 'cursor', 'after', 'limit']);
+        const query = {};
+        for (const [key, value] of url.searchParams.entries()) if (allowed.has(key)) query[key] = key === 'includeCluster' ? value === 'true' : key === 'limit' ? Number(value) : value;
+        return { status: 200, payload: await timelineProvider.list(target, query), headers: responseCorsHeaders };
+      } catch (error) {
+        return { status: 502, payload: { message: error instanceof Error ? error.message : 'The agent could not read Cluster Timeline.' }, headers: responseCorsHeaders };
+      }
     }
 
     if (url.pathname === '/v1/mcp') {

@@ -10,6 +10,7 @@ import { createAgentRelayClient } from './relay.js';
 import { createAgentLogger } from './logger.js';
 import { createAgentMetricsState, createPrometheusExporter } from './metrics-exporter.js';
 import { coalesceAsyncTask } from './task-runner.js';
+import { createTimelineManager } from './timeline/index.js';
 
 const AGENT_VERSION = typeof KUBI_AGENT_COMPILED_VERSION !== 'undefined'
   ? KUBI_AGENT_COMPILED_VERSION
@@ -23,6 +24,7 @@ const DEFAULT_CAPABILITIES = {
   runtimeApiVersion: LOCAL_AGENT_RUNTIME_API_VERSION,
   policyPosture: true,
   autoscalingCapacity: true,
+  clusterTimeline: true,
   buildId: AGENT_BUILD_ID
 };
 const RUNNING_RELEASE = {
@@ -96,6 +98,7 @@ async function runAgent() {
     lastScannedAt: null,
     lastError: null
   };
+  const timelineManager = createTimelineManager({ runtimeConfig, logger });
 
   const refreshDiscovery = coalesceAsyncTask(async () => {
     try {
@@ -127,6 +130,7 @@ async function runAgent() {
   const server = createAgentLoopbackServer({
     runtimeConfig,
     discoveryScanProvider: refreshDiscovery,
+    timelineProvider: timelineManager,
     onRuntimeRequest({ requestId, endpoint, status, durationMs, authorizeMs, selectorMs, resourceMs }) {
       const message = `KUBI runtime request id=${requestId} path=${endpoint} status=${status} durationMs=${durationMs} authorizeMs=${authorizeMs} selectorMs=${selectorMs} resourceMs=${resourceMs}`;
       if (durationMs >= 2_000 || status >= 500 || endpoint === '/v1/delivery-activity') logger.info(message);
@@ -179,7 +183,7 @@ async function runAgent() {
 
   const heartbeat = coalesceAsyncTask(async () => {
     try {
-      await sendAgentHeartbeat({
+      const heartbeatResult = await sendAgentHeartbeat({
         controlPlaneUrl: runtimeConfig.controlPlaneUrl,
         agentId: runtimeConfig.agentId,
         agentSecret: runtimeConfig.agentSecret,
@@ -190,6 +194,7 @@ async function runAgent() {
           discoveredContextCount: discoveryState.candidateCount
         }
       });
+      await timelineManager.applyDesiredConfig(heartbeatResult.timeline);
       metricsState.heartbeatLastSuccessTimestampSeconds = Math.floor(Date.now() / 1000);
     } catch (error) {
       metricsState.errors.heartbeat += 1;
@@ -215,6 +220,7 @@ async function runAgent() {
     shuttingDown = true;
     clearInterval(interval);
     relay.close();
+    await timelineManager.close().catch(() => undefined);
     await metricsExporter.close().catch(() => undefined);
     await server.close().catch(() => undefined);
     process.exit(0);

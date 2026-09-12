@@ -171,3 +171,13 @@ npm test
 The source package is ESM and targets Node.js 22+. Never commit kubeconfigs, pairing identities, provider tokens, private keys, or generated credential files.
 
 Agent `v0.1.43` adds optional read-only Autoscaling & Capacity collection: HPA, VPA, KEDA, PDB, ResourceQuota, LimitRange, scheduler capacity, Karpenter, Cluster Autoscaler, and opt-in cloud node-pool inventory. Cloud adapters run only on the customer host and remain disabled by default. Runtime API v2 compatibility is preserved.
+
+Agent `v0.1.45` adds optional Cluster Timeline collection. The hosted workspace
+owner or admin enables it per agent-backed connection; the agent then records
+bounded Kubernetes warnings, meaningful workload/pod/node/storage transitions,
+recoveries, and supported delivery/backup resource changes locally. Existing
+objects are used as the initial baseline and do not generate synthetic events.
+The local SQLite history defaults to seven days and supports 1-30 days of
+retention. Timeline events and log excerpts never cross the relay; only desired
+enablement and retention metadata are exchanged with the control plane. Missing
+permissions, API reconnects, and retention gaps are reported explicitly.
