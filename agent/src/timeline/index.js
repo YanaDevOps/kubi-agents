@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { createTimelineStore } from './store.js';
-import { reduceTimelineEvents, reduceTimelineObject } from './events.js';
+import { reduceTimelineEvents, reduceTimelineLifecycle } from './events.js';
 import { fetchKubeList, loadLocalKubeConfig, loadLocalPodLogs, resolveAgentRuntimeConfigForSelector } from '../kube.js';
 import { DELIVERY_RESOURCE_DEFINITIONS } from '../../../src/shared/delivery-activity.js';
 import { BACKUP_RESOURCE_DEFINITIONS } from '../../../src/shared/backup-activity.js';
@@ -13,6 +13,8 @@ const CORE_SOURCE_DEFS = [
   ['deployments', '/apis/apps/v1/deployments'],
   ['statefulsets', '/apis/apps/v1/statefulsets'],
   ['daemonsets', '/apis/apps/v1/daemonsets'],
+  ['jobs', '/apis/batch/v1/jobs'],
+  ['cronjobs', '/apis/batch/v1/cronjobs'],
   ['services', '/api/v1/services'],
   ['persistentvolumes', '/api/v1/persistentvolumes'],
   ['persistentvolumeclaims', '/api/v1/persistentvolumeclaims'],
@@ -85,6 +87,37 @@ function emptyState() {
   return { initialized: false, sources: {}, lastObservedAt: null, gaps: 0 };
 }
 
+export function reduceTimelineSnapshot(baseline, sources, observedAt) {
+  if (!baseline?.initialized) return [];
+  const events = [];
+  for (const [source, objects] of Object.entries(sources || {})) {
+    const previousObjects = baseline.sources?.[source];
+    // A source returning after a permission/network gap is a new baseline, not
+    // evidence that every object was just created.
+    if (!previousObjects) continue;
+    for (const [key, current] of Object.entries(objects || {})) {
+      const previous = previousObjects[key];
+      events.push(...(previous
+        ? reduceTimelineEvents(previous, current, { observedAt })
+        : current?.kind === 'Event'
+          ? reduceTimelineEvents(null, current, { observedAt })
+          : reduceTimelineLifecycle(null, current, { observedAt })));
+    }
+    for (const [key, previous] of Object.entries(previousObjects)) {
+      if (!Object.hasOwn(objects || {}, key)) {
+        events.push(...reduceTimelineLifecycle(previous, null, { observedAt }));
+      }
+    }
+  }
+  return events;
+}
+
+async function appendEvents(store, key, events) {
+  for (let offset = 0; offset < events.length; offset += 100) {
+    await store.append(key, events.slice(offset, offset + 100));
+  }
+}
+
 class TargetCollector {
   constructor(manager, target) {
     this.manager = manager;
@@ -132,14 +165,7 @@ class TargetCollector {
         this.sources[index] = { id, state: 'collecting', lastObservedAt: observedAt };
       });
       if (this.baseline.initialized) {
-        const events = [];
-        for (const [source, objects] of Object.entries(next.sources)) {
-          for (const [key, current] of Object.entries(objects)) {
-            const previous = this.baseline.sources?.[source]?.[key];
-            if (!previous) continue;
-            events.push(...reduceTimelineEvents(previous, current, { observedAt }));
-          }
-        }
+        const events = reduceTimelineSnapshot(this.baseline, next.sources, observedAt);
         if (events.length) {
           const enriched = await Promise.all(events.map(async (event) => {
             if (event.resource?.kind !== 'Pod' || !LOG_REASONS.test(event.reason || '')) return { ...event, sourceId: 'kubernetes' };
@@ -156,7 +182,7 @@ class TargetCollector {
               return { ...event, sourceId: 'kubernetes', logs: [{ container: event.after?.container, previous: false, message: error instanceof Error ? error.message : 'Logs unavailable', capturedAt: observedAt }] };
             } finally { release(); }
           }));
-          await this.manager.store.append(this.key, enriched);
+          await appendEvents(this.manager.store, this.key, enriched);
         }
       }
       await this.manager.store.saveState(this.key, next);
@@ -204,6 +230,8 @@ export function createTimelineManager({ runtimeConfig, logger = console } = {}) 
           collector = new TargetCollector(manager, target);
           collectors.set(key, collector);
           void collector.start().catch((error) => logger.warn(`Timeline collector failed: ${error.message}`));
+        } else {
+          collector.target = target;
         }
         await store.get().then((value) => value.prune(key, { retentionDays: target.retentionDays })).catch((error) => logger.warn(`Timeline retention update failed: ${error.message}`));
       }
@@ -214,7 +242,14 @@ export function createTimelineManager({ runtimeConfig, logger = console } = {}) 
       const key = targetKey(target);
       const collector = collectors.get(key);
       if (!collector) return { state: 'disabled', enabled: false, retentionDays: target.retentionDays || 7, sources: [], message: 'Collection is disabled for this connection.' };
-      return { state: collector.state, enabled: true, retentionDays: target.retentionDays || 7, sources: collector.sources, ...(await collector.status()) };
+      return {
+        state: collector.state,
+        enabled: true,
+        retentionDays: collector.target.retentionDays || 7,
+        revision: collector.target.revision || 0,
+        sources: collector.sources,
+        ...(await collector.status())
+      };
     },
     async close() {
       closed = true; manager.closed = true;

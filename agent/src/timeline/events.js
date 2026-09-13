@@ -63,12 +63,51 @@ function resourceOf(object, reference = false) {
 
 function nativeCategory(object) {
   const group = object?.apiVersion?.includes('/') ? object.apiVersion.split('/')[0] : '';
-  if (group === '' && ['Pod', 'Node', 'PersistentVolume', 'PersistentVolumeClaim', 'ReplicationController'].includes(object?.kind)) {
-    return object.kind === 'Pod' ? 'pod' : object.kind === 'Node' ? 'node' : object.kind === 'ReplicationController' ? 'workload' : 'storage';
+  if (group === '' && ['Pod', 'Node', 'Service', 'PersistentVolume', 'PersistentVolumeClaim', 'ReplicationController'].includes(object?.kind)) {
+    return object.kind === 'Pod' ? 'pod'
+      : object.kind === 'Node' ? 'node'
+        : object.kind === 'Service' ? 'networking'
+          : object.kind === 'ReplicationController' ? 'workload' : 'storage';
   }
   if (group === 'apps' && ['Deployment', 'StatefulSet', 'DaemonSet', 'ReplicaSet'].includes(object?.kind)) return 'workload';
   if (group === 'batch' && ['Job', 'CronJob'].includes(object?.kind)) return 'job';
   return null;
+}
+
+/**
+ * Snapshot lifecycle is intentionally separate from transition reduction. The
+ * collector calls this only after a successful baseline for the same source,
+ * so enabling Timeline never emits every resource that already exists.
+ */
+export function reduceTimelineLifecycle(previous, current, options = {}) {
+  if (Boolean(previous) === Boolean(current)) return [];
+  const object = current || previous;
+  if (object?.kind === 'Event' || object?.kind === 'Pod') return [];
+  const resource = resourceOf(object);
+  const definition = definitionOf(object);
+  const category = definition?.timelineCategory || nativeCategory(object);
+  if (!resource || !category) return [];
+  const created = Boolean(current);
+  const reason = `${resource.kind}${created ? 'Created' : 'Deleted'}`;
+  const observedAt = timestamp(options.observedAt) || '1970-01-01T00:00:00.000Z';
+  const occurredAt = created ? timestamp(current?.metadata?.creationTimestamp) || observedAt : observedAt;
+  const id = hash(['lifecycle', resource.uid, resource.apiVersion, resource.kind, created ? 'created' : 'deleted']);
+  return [{
+    id,
+    dedupKey: id,
+    source: 'kubernetes-object',
+    category,
+    severity: 'change',
+    reason,
+    title: sanitizeTimelineText(`${resource.kind} ${resource.name}: ${created ? 'created' : 'deleted'}`, 256),
+    summary: `${resource.kind} was ${created ? 'created' : 'deleted'}`,
+    resource,
+    occurredAt,
+    observedAt,
+    before: created ? null : { lifecycle: 'present' },
+    after: created ? { lifecycle: 'created' } : { lifecycle: 'deleted' },
+    ...(definition ? { providerId: definition.providerId } : {})
+  }];
 }
 
 function definitionOf(object) {
@@ -324,7 +363,7 @@ export function reduceKubernetesEvent(previous, current, options = {}) {
     title: sanitizeTimelineText(`${resource.kind} ${resource.name}: ${reason}`, 256),
     summary: sanitizeTimelineText(current.note || current.message || reason), resource,
     occurredAt: occurrence.time || observedAt, observedAt,
-    before: prior ? { count: prior.count } : null, after: { count: occurrence.count, type: current.type },
+    before: prior ? { count: prior.count } : null, after: { count: occurrence.count, type: current.type }, count: occurrence.count,
     ...(definition ? { providerId: definition.providerId } : {})
   }];
 }
