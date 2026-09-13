@@ -58,7 +58,12 @@ jobs:
             --outfile=dist/${{ matrix.artifact }}
       - name: Write checksum
         shell: bash
-        run: sha256sum dist/${{ matrix.artifact }} > dist/${{ matrix.artifact }}.sha256
+        run: |
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum dist/${{ matrix.artifact }} > dist/${{ matrix.artifact }}.sha256
+          else
+            shasum -a 256 dist/${{ matrix.artifact }} > dist/${{ matrix.artifact }}.sha256
+          fi
       - name: Verify embedded release version
         if: matrix.target == 'bun-linux-x64'
         shell: bash
