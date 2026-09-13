@@ -6,6 +6,7 @@ on:
       version:
         description: Agent version
         required: true
+        type: string
   push:
     tags:
       - "agent-v*"
@@ -66,7 +67,7 @@ jobs:
             dist/${{ matrix.artifact }}.sha256
 
   publish:
-    if: startsWith(github.ref, 'refs/tags/agent-v')
+    if: startsWith(github.ref, 'refs/tags/agent-v') || github.event_name == 'workflow_dispatch'
     needs: build
     runs-on: ubuntu-latest
     steps:
@@ -93,4 +94,7 @@ jobs:
           done
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('agent-v{0}', inputs.version) }}
+          name: kubi-agent ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('v{0}', inputs.version) }}
+          generate_release_notes: true
           files: dist/*
