@@ -52,7 +52,7 @@ jobs:
           KUBI_AGENT_BUILD_ID: ${{ github.sha }}
         run: |
           VERSION="${KUBI_AGENT_VERSION#agent-v}"
-          bun build agent/src/cli.js --compile --target=${{ matrix.target }} \
+          bun build agent/src/cli.js agent/src/timeline/store-worker.js --compile --target=${{ matrix.target }} \
             --define KUBI_AGENT_COMPILED_VERSION="\"${VERSION}\"" \
             --define KUBI_AGENT_COMPILED_BUILD_ID="\"${KUBI_AGENT_BUILD_ID}\"" \
             --outfile=dist/${{ matrix.artifact }}
