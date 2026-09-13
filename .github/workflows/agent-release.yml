@@ -18,12 +18,13 @@ permissions:
 jobs:
   build:
     strategy:
+      fail-fast: false
       matrix:
         include:
           - runner: ubuntu-latest
             target: bun-linux-x64
             artifact: kubi-agent-linux-amd64
-          - runner: ubuntu-latest
+          - runner: ubuntu-24.04-arm
             target: bun-linux-arm64
             artifact: kubi-agent-linux-arm64
           - runner: macos-13
