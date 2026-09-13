@@ -68,6 +68,7 @@ describe('agent storage driver metrics', () => {
       pools: [{ id: 1, name: 'data', status: 'active', max_available: 1024, used_raw: 0 }],
       osds: [{ name: 1, parent: 'node-a', up: true, size: 1024, free: 1024 }]
     };
+    let monitorProbeCount = 0;
 
     try {
       const overview = await loadLocalStorageDriverOverview({
@@ -86,7 +87,11 @@ describe('agent storage driver metrics', () => {
         }
       }, { driver: 'csi.vitastor.io' }, {
         execFile: async (_command, args) => JSON.stringify(payloads[args[0]]),
-        discoverVitastorConfig: async () => ({ endpoints: [], prefix: '/vitastor', poolIds: [], evidence: [] })
+        discoverVitastorConfig: async () => ({ endpoints: [], prefix: '/vitastor', poolIds: [], evidence: [] }),
+        requestVitastorMonitorMetrics: async () => {
+          monitorProbeCount += 1;
+          throw new Error('Monitor metrics are intentionally unavailable in this fixture.');
+        }
       });
 
       expect(overview.driver.metricsSource).toBe('vitastor-cli');
@@ -98,6 +103,7 @@ describe('agent storage driver metrics', () => {
       expect(overview.summary.osd).toEqual({ up: 1, total: 1 });
       expect(overview.summary.pools).toBe(1);
       expect(overview.errors).toEqual([]);
+      expect(monitorProbeCount).toBe(2);
     } finally {
       await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     }

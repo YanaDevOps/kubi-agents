@@ -416,14 +416,14 @@ function monitorAddresses(record) {
   return unique(addresses.map((value) => String(value).trim()));
 }
 
-async function probeMonitor(member, config, masterId) {
+async function probeMonitor(member, config, masterId, requestMetrics = request) {
   const addresses = monitorAddresses(member.record);
   const address = addresses.find((value) => /^\d{1,3}(?:\.\d{1,3}){3}$/.test(value)) || addresses[0] || member.id;
   const metricsUrl = withScheme(`${address}:8060`, config.metrics.scheme);
   let metrics = { objectBytes: {}, objectCount: {}, readOps: 0, writeOps: 0 };
   let status = 'up';
   try {
-    const response = await request(`${metricsUrl}/metrics`, {
+    const response = await requestMetrics(`${metricsUrl}/metrics`, {
       headers: metricHeaders(config.metrics.auth),
       timeoutSeconds: config.metrics.timeoutSeconds,
       tls: config.tls
@@ -592,7 +592,7 @@ function resolvedVitastorConfig(configured, discovered) {
   };
 }
 
-async function loadVitastorMonitorInventory(config) {
+async function loadVitastorMonitorInventory(config, requestMetrics = request) {
   for (const endpoint of config.endpoints) {
     try {
       const entries = await etcdRange(endpoint, `${config.prefix.replace(/\/+$/, '')}/`, config);
@@ -603,7 +603,9 @@ async function loadVitastorMonitorInventory(config) {
         .filter((entry) => entry.key.includes('/mon/member/'))
         .map((entry) => ({ id: entry.key.split('/').at(-1), record: parseJson(entry.value) }));
       if (members.length === 0) continue;
-      const results = await Promise.all(members.map((member) => probeMonitor(member, config, masterId)));
+      const results = await Promise.all(
+        members.map((member) => probeMonitor(member, config, masterId, requestMetrics))
+      );
       return results.map((result) => result.row);
     } catch {
       // Monitor inventory enriches CLI data and must not downgrade otherwise healthy metrics.
@@ -612,13 +614,19 @@ async function loadVitastorMonitorInventory(config) {
   return [];
 }
 
-async function enrichCliOverviewWithMonitors(overview, runtimeConfig, configured, discoverConfig = discoverVitastorConfig) {
+async function enrichCliOverviewWithMonitors(
+  overview,
+  runtimeConfig,
+  configured,
+  discoverConfig = discoverVitastorConfig,
+  requestMetrics = request
+) {
   const discovered = await discoverConfig(runtimeConfig)
     .catch(() => ({ endpoints: [], prefix: '/vitastor', poolIds: [], evidence: [] }));
   const config = resolvedVitastorConfig(configured, discovered);
   if (config.endpoints.length === 0) return overview;
 
-  const monitors = await loadVitastorMonitorInventory(config);
+  const monitors = await loadVitastorMonitorInventory(config, requestMetrics);
   if (monitors.length === 0) return overview;
   const reportedTotal = numeric(overview.summary?.monitors?.total);
   const monitorUp = monitors.filter((monitor) => monitor.status === 'up').length;
@@ -661,7 +669,8 @@ async function loadVitastorStorageDriverOverview(runtimeConfig, input = {}, depe
         cliOverview,
         runtimeConfig,
         configured,
-        dependencies.discoverVitastorConfig || discoverVitastorConfig
+        dependencies.discoverVitastorConfig || discoverVitastorConfig,
+        dependencies.requestVitastorMonitorMetrics || request
       );
     }
   } catch (error) {
