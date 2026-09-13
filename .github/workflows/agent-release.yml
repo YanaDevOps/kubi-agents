@@ -75,6 +75,7 @@ jobs:
           OUTPUT="$(env -u KUBI_AGENT_VERSION -u KUBI_AGENT_BUILD_ID dist/${{ matrix.artifact }} version)"
           echo "$OUTPUT"
           echo "$OUTPUT" | grep -F "kubi-agent ${VERSION} ("
+          dist/${{ matrix.artifact }} diagnostics timeline-store
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}

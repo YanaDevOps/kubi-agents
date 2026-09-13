@@ -31,7 +31,7 @@ export async function createTimelineStore({
   // be used as a worker entrypoint. The worker is an actual module file.
   const compiledBun = Boolean(process.versions.bun && !/(^|[\\/])bun(?:\.exe)?$/i.test(process.execPath));
   const workerUrl = compiledBun
-    ? new URL('./agent/src/timeline/store-worker.js', import.meta.url)
+    ? new URL('./timeline/store-worker.js', import.meta.url)
     : new URL('./store-worker.js', import.meta.url);
   const worker = compiledBun
     ? new globalThis.Worker(workerUrl)

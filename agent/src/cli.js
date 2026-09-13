@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 
 import os from 'node:os';
+import path from 'node:path';
 import process from 'node:process';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { getAgentConfigPath, getAgentSettingsPath, loadAgentConfig, loadAgentSettings, LOCAL_AGENT_RUNTIME_API_VERSION, redactAgentRuntimeConfig, resolveAgentRuntimeConfig, saveAgentConfig, validateAgentSettings } from './config.js';
 import { registerAgentWithControlPlane, rotateAgentCredentials, sendAgentHeartbeat, syncDiscoveredCandidates } from './control-plane.js';
 import { createAgentLoopbackServer } from './server.js';
@@ -11,6 +13,7 @@ import { createAgentLogger } from './logger.js';
 import { createAgentMetricsState, createPrometheusExporter } from './metrics-exporter.js';
 import { coalesceAsyncTask } from './task-runner.js';
 import { createTimelineManager } from './timeline/index.js';
+import { createTimelineStore } from './timeline/store.js';
 
 const AGENT_VERSION = typeof KUBI_AGENT_COMPILED_VERSION !== 'undefined'
   ? KUBI_AGENT_COMPILED_VERSION
@@ -253,6 +256,28 @@ function printVersion() {
   console.log(`kubi-agent ${AGENT_VERSION} (${AGENT_BUILD_ID}) runtime-api/${LOCAL_AGENT_RUNTIME_API_VERSION}`);
 }
 
+async function diagnoseTimelineStore() {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'kubi-agent-timeline-diagnostic-'));
+  const store = await createTimelineStore({ directory });
+  const targetKey = 'a'.repeat(64);
+  try {
+    await store.append(targetKey, {
+      category: 'diagnostic',
+      severity: 'info',
+      reason: 'TimelineStoreDiagnostic',
+      message: 'Timeline store diagnostic event',
+      observedAt: new Date().toISOString(),
+      resource: { kind: 'Agent', name: 'diagnostic' }
+    });
+    const result = await store.list(targetKey, { limit: 1 });
+    if (result.items.length !== 1) throw new Error('Timeline store diagnostic did not read its event.');
+  } finally {
+    await store.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+  console.log('Timeline store diagnostic passed.');
+}
+
 function configCommand(action) {
   const settings = loadAgentSettings({ required: action === 'validate' });
   validateAgentSettings(settings);
@@ -295,6 +320,10 @@ async function main() {
     configCommand(process.argv[3] === 'show' && process.argv.includes('--effective') ? 'show' : process.argv[3]);
     return;
   }
+  if (command === 'diagnostics' && process.argv[3] === 'timeline-store') {
+    await diagnoseTimelineStore();
+    return;
+  }
 
   console.log('Usage:');
   console.log('  node agent/src/cli.js pair --control-plane-url <url> --pairing-token <token>');
@@ -303,6 +332,7 @@ async function main() {
   console.log('  node agent/src/cli.js version');
   console.log('  node agent/src/cli.js config validate');
   console.log('  node agent/src/cli.js config show --effective');
+  console.log('  node agent/src/cli.js diagnostics timeline-store');
 }
 
 main().catch((error) => {

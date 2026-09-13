@@ -89,6 +89,7 @@ All deep storage collectors and external CI integrations are opt-in. Restart the
 ```sh
 kubi-agent config validate
 kubi-agent config show --effective
+kubi-agent diagnostics timeline-store
 ```
 
 Effective configuration output redacts identity secrets, provider credentials, and protected credential paths.
@@ -143,7 +144,12 @@ kubi-agent version
 kubi-agent config validate
 kubi-agent config show --effective
 kubi-agent rotate
+kubi-agent diagnostics timeline-store
 ```
+
+`diagnostics timeline-store` creates an isolated temporary SQLite store, verifies
+one write/read cycle through the packaged worker, and removes the temporary data.
+It does not connect to Kubernetes or modify retained Timeline history.
 
 ## Documentation
 
@@ -181,3 +187,7 @@ The local SQLite history defaults to seven days and supports 1-30 days of
 retention. Timeline events and log excerpts never cross the relay; only desired
 enablement and retention metadata are exchanged with the control plane. Missing
 permissions, API reconnects, and retention gaps are reported explicitly.
+
+Agent `v0.1.48` corrects the packaged Timeline worker path in standalone release
+binaries. Release CI runs `kubi-agent diagnostics timeline-store` against the
+compiled Linux artifact before publication.
