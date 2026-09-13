@@ -153,11 +153,19 @@ class TargetCollector {
     const restored = await this.manager.store.getState(this.key);
     this.baseline = restoreTimelineBaseline(restored);
     await this.collect();
-    this.timer = setInterval(() => void this.collect(), POLL_MS);
+    this.schedule();
+  }
+
+  schedule() {
+    if (this.timer || this.manager.closed) return;
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      void this.collect().finally(() => this.schedule());
+    }, POLL_MS);
   }
 
   async stop() {
-    if (this.timer) clearInterval(this.timer);
+    if (this.timer) clearTimeout(this.timer);
     this.timer = null;
   }
 
@@ -209,8 +217,10 @@ class TargetCollector {
       this.state = failures ? 'partial' : 'collecting';
       this.message = failures ? `${failures} Kubernetes sources were unavailable during the latest poll.` : '';
     } catch (error) {
+      const previousMessage = this.message;
       this.state = 'offline';
       this.message = error instanceof Error ? error.message : 'Timeline collection failed.';
+      if (this.message !== previousMessage) this.manager.logger.warn(`Timeline collection failed: ${this.message}`);
     } finally {
       this.running = false;
     }
@@ -229,7 +239,7 @@ export function createTimelineManager({ runtimeConfig, logger = console } = {}) 
   let activeLogReads = 0;
   const store = { get: () => { storePromise ||= createTimelineStore(); return storePromise; } };
   const manager = {
-    runtimeConfig, store: null, closed: false,
+    runtimeConfig, logger, store: null, closed: false,
     acquireLogSlot() {
       if (activeLogReads >= 2) return null;
       activeLogReads += 1;
