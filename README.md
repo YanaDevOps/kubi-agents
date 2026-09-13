@@ -192,6 +192,7 @@ Agent `v0.1.48` corrects the packaged Timeline worker path in standalone release
 binaries. Release CI runs `kubi-agent diagnostics timeline-store` against the
 compiled Linux artifact before publication.
 
-Agent `v0.1.49` records resources and meaningful Kubernetes Events first seen
+Agent `v0.1.50` records resources and meaningful Kubernetes Events first seen
 after the baseline, preserves complete feed/detail fields in SQLite, restores
-transition baselines after restart, and reports the applied settings revision.
+transition baselines after restart, restores TypeMeta omitted by Kubernetes
+List responses, and reports the applied settings revision.

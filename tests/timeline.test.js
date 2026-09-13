@@ -2,10 +2,22 @@ import { describe, expect, test } from 'bun:test';
 import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { reduceTimelineSnapshot } from '../agent/src/timeline/index.js';
+import { normalizeTimelineSourceItem, reduceTimelineSnapshot, restoreTimelineBaseline } from '../agent/src/timeline/index.js';
 import { createTimelineStore } from '../agent/src/timeline/store.js';
 
 describe('cluster Timeline collection', () => {
+  test('restores omitted List TypeMeta and safely migrates older baselines', () => {
+    expect(normalizeTimelineSourceItem(
+      { metadata: { name: 'api', uid: 'deploy-1' } },
+      'apps/v1',
+      'Deployment'
+    )).toMatchObject({ apiVersion: 'apps/v1', kind: 'Deployment' });
+    expect(restoreTimelineBaseline({ initialized: true, sources: { deployments: {} } }))
+      .toMatchObject({ schemaVersion: 2, initialized: false, sources: {} });
+    const current = { schemaVersion: 2, initialized: true, sources: {} };
+    expect(restoreTimelineBaseline(current)).toBe(current);
+  });
+
   test('records resource lifecycle and new meaningful events only after baseline', () => {
     const deployment = {
       apiVersion: 'apps/v1', kind: 'Deployment',
@@ -39,7 +51,7 @@ describe('cluster Timeline collection', () => {
     const store = await createTimelineStore({ directory });
     const key = 'a'.repeat(64);
     try {
-      await store.saveState(key, { initialized: true, sources: { pods: { pod: {
+      await store.saveState(key, { schemaVersion: 2, initialized: true, sources: { pods: { pod: {
         apiVersion: 'v1', kind: 'Pod', metadata: { name: 'api-0', namespace: 'default', uid: 'pod-1' },
         status: { phase: 'Running', containerStatuses: [{ name: 'api', restartCount: 0, ready: true, state: { running: {} } }] }
       } } } });
@@ -53,6 +65,7 @@ describe('cluster Timeline collection', () => {
       const page = await store.list(key, { limit: 1 });
       expect(page.items[0]).toMatchObject({ sequence: 1, source: 'kubernetes-event', title: 'Pod api-0: BackOff', summary: 'Container is backing off' });
       expect(JSON.stringify(page.items[0])).not.toContain('supersecret');
+      expect((await store.getState(key))?.schemaVersion).toBe(2);
       expect((await store.getState(key))?.sources?.pods?.pod?.metadata?.uid).toBe('pod-1');
     } finally {
       await store.close();

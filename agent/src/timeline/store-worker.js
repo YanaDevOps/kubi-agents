@@ -287,7 +287,7 @@ function sanitizeState(state) {
   for (const field of ['sources', 'baselines', 'checkpoints']) {
     if (state?.[field] != null) result[field] = clean(state[field], 0, field === 'sources' ? 2 : 1);
   }
-  for (const field of ['initialized', 'lastObservedAt', 'gaps']) {
+  for (const field of ['schemaVersion', 'initialized', 'lastObservedAt', 'gaps']) {
     if (state?.[field] != null) result[field] = clean(state[field], 0);
   }
   const body = JSON.stringify(result);

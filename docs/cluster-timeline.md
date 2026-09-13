@@ -13,6 +13,12 @@ filtered. A source returning after a permission or network gap establishes a
 fresh source baseline instead of reporting every object as newly created.
 Permission gaps and reconnects are reported as partial coverage.
 
+Some Kubernetes API servers omit per-item `apiVersion` and `kind` TypeMeta from
+List responses. The collector restores those values from its fixed read-only
+endpoint catalog before projecting resource state. Persisted baselines are
+schema-versioned; an incompatible baseline is replaced by a fresh observation
+instead of turning existing cluster inventory into false creation events.
+
 Only settings and target identity cross the relay. Events, Kubernetes specs,
 Secret values, kubeconfigs, and bounded failure log excerpts remain on the
 customer host in per-target SQLite storage with retention and size quotas.

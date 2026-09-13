@@ -7,25 +7,28 @@ import { BACKUP_RESOURCE_DEFINITIONS } from '../../../src/shared/backup-activity
 
 const POLL_MS = 15_000;
 const MAX_ITEMS = 2_000;
+const BASELINE_SCHEMA_VERSION = 2;
 const CORE_SOURCE_DEFS = [
-  ['pods', '/api/v1/pods'],
-  ['nodes', '/api/v1/nodes'],
-  ['deployments', '/apis/apps/v1/deployments'],
-  ['statefulsets', '/apis/apps/v1/statefulsets'],
-  ['daemonsets', '/apis/apps/v1/daemonsets'],
-  ['jobs', '/apis/batch/v1/jobs'],
-  ['cronjobs', '/apis/batch/v1/cronjobs'],
-  ['services', '/api/v1/services'],
-  ['persistentvolumes', '/api/v1/persistentvolumes'],
-  ['persistentvolumeclaims', '/api/v1/persistentvolumeclaims'],
-  ['events', '/api/v1/events'],
-  ['events.k8s.io', '/apis/events.k8s.io/v1/events']
+  ['pods', '/api/v1/pods', 'v1', 'Pod'],
+  ['nodes', '/api/v1/nodes', 'v1', 'Node'],
+  ['deployments', '/apis/apps/v1/deployments', 'apps/v1', 'Deployment'],
+  ['statefulsets', '/apis/apps/v1/statefulsets', 'apps/v1', 'StatefulSet'],
+  ['daemonsets', '/apis/apps/v1/daemonsets', 'apps/v1', 'DaemonSet'],
+  ['jobs', '/apis/batch/v1/jobs', 'batch/v1', 'Job'],
+  ['cronjobs', '/apis/batch/v1/cronjobs', 'batch/v1', 'CronJob'],
+  ['services', '/api/v1/services', 'v1', 'Service'],
+  ['persistentvolumes', '/api/v1/persistentvolumes', 'v1', 'PersistentVolume'],
+  ['persistentvolumeclaims', '/api/v1/persistentvolumeclaims', 'v1', 'PersistentVolumeClaim'],
+  ['events', '/api/v1/events', 'v1', 'Event'],
+  ['events.k8s.io', '/apis/events.k8s.io/v1/events', 'events.k8s.io/v1', 'Event']
 ];
 
 const PROVIDER_SOURCE_DEFS = [...DELIVERY_RESOURCE_DEFINITIONS, ...BACKUP_RESOURCE_DEFINITIONS]
   .map((definition) => [
     `${definition.providerId}:${definition.resource}`,
-    `/apis/${definition.group}/${definition.versions[0]}/${definition.resource}`
+    `/apis/${definition.group}/${definition.versions[0]}/${definition.resource}`,
+    `${definition.group}/${definition.versions[0]}`,
+    definition.kind
   ])
   .filter(([, path], index, entries) => entries.findIndex(([, candidate]) => candidate === path) === index);
 const SOURCE_DEFS = [...CORE_SOURCE_DEFS, ...PROVIDER_SOURCE_DEFS];
@@ -77,14 +80,28 @@ function eventProject(object) {
   return { ...object, metadata: { uid: object.metadata.uid, creationTimestamp: object.metadata.creationTimestamp } };
 }
 
-async function listSource(runtimeConfig, path) {
+export function normalizeTimelineSourceItem(item, apiVersion, kind) {
+  if (!item || typeof item !== 'object' || Array.isArray(item)) return item;
+  return {
+    ...item,
+    apiVersion: item.apiVersion || apiVersion,
+    kind: item.kind || kind
+  };
+}
+
+async function listSource(runtimeConfig, path, apiVersion, kind) {
   const kubeConfig = runtimeConfig.__kubeConfig || runtimeConfig.kubeConfig || loadLocalKubeConfig(runtimeConfig);
   const result = await fetchKubeList(kubeConfig, path, true, { pageLimit: 500, maxPages: 4 });
-  return (result?.items || []).slice(0, MAX_ITEMS);
+  return (result?.items || []).slice(0, MAX_ITEMS)
+    .map((item) => normalizeTimelineSourceItem(item, apiVersion, kind));
 }
 
 function emptyState() {
-  return { initialized: false, sources: {}, lastObservedAt: null, gaps: 0 };
+  return { schemaVersion: BASELINE_SCHEMA_VERSION, initialized: false, sources: {}, lastObservedAt: null, gaps: 0 };
+}
+
+export function restoreTimelineBaseline(state) {
+  return state?.schemaVersion === BASELINE_SCHEMA_VERSION ? state : emptyState();
 }
 
 export function reduceTimelineSnapshot(baseline, sources, observedAt) {
@@ -133,7 +150,8 @@ class TargetCollector {
   }
 
   async start() {
-    this.baseline = (await this.manager.store.getState(this.key)) || emptyState();
+    const restored = await this.manager.store.getState(this.key);
+    this.baseline = restoreTimelineBaseline(restored);
     await this.collect();
     this.timer = setInterval(() => void this.collect(), POLL_MS);
   }
@@ -149,8 +167,8 @@ class TargetCollector {
     const observedAt = new Date().toISOString();
     try {
       const resolved = resolveAgentRuntimeConfigForSelector(this.manager.runtimeConfig, this.target.connectionSelector);
-      const results = await Promise.allSettled(SOURCE_DEFS.map(([, path]) => listSource(resolved, path)));
-      const next = { initialized: true, sources: {}, lastObservedAt: observedAt, gaps: 0 };
+      const results = await Promise.allSettled(SOURCE_DEFS.map(([, path, apiVersion, kind]) => listSource(resolved, path, apiVersion, kind)));
+      const next = { schemaVersion: BASELINE_SCHEMA_VERSION, initialized: true, sources: {}, lastObservedAt: observedAt, gaps: 0 };
       let failures = 0;
       results.forEach((result, index) => {
         const [id] = SOURCE_DEFS[index];
