@@ -29,9 +29,15 @@ export async function createTimelineStore({
   }
   // A parent launched with --input-type=module (common in smoke tests) cannot
   // be used as a worker entrypoint. The worker is an actual module file.
-  const worker = new Worker(new URL('./store-worker.js', import.meta.url), {
-    execArgv: process.execArgv.filter((argument) => argument !== '--input-type=module')
-  });
+  const compiledBun = Boolean(process.versions.bun && !/(^|[\\/])bun(?:\.exe)?$/i.test(process.execPath));
+  const workerUrl = compiledBun
+    ? new URL('./agent/src/timeline/store-worker.js', import.meta.url)
+    : new URL('./store-worker.js', import.meta.url);
+  const worker = compiledBun
+    ? new globalThis.Worker(workerUrl)
+    : new Worker(workerUrl, {
+      execArgv: process.execArgv.filter((argument) => argument !== '--input-type=module')
+    });
   const pending = new Map();
   let sequence = 0;
   let closed = false;
@@ -42,17 +48,23 @@ export async function createTimelineStore({
     for (const request of pending.values()) request.reject(fatal);
     pending.clear();
   };
-  worker.on('error', fail);
-  worker.on('exit', (code) => {
-    if (!closed || pending.size) fail(failure(`Timeline worker exited (${code})`, 'TIMELINE_WORKER'));
-  });
-  worker.on('message', ({ id, result, error }) => {
+  const handleMessage = ({ id, result, error }) => {
     const request = pending.get(id);
     if (!request) return;
     pending.delete(id);
     if (error) request.reject(failure(error.message, error.code));
     else request.resolve(result);
-  });
+  };
+  if (compiledBun) {
+    worker.addEventListener('error', (event) => fail(event.error || new Error(event.message || 'Timeline worker failed.')));
+    worker.addEventListener('message', (event) => handleMessage(event.data));
+  } else {
+    worker.on('error', fail);
+    worker.on('exit', (code) => {
+      if (!closed || pending.size) fail(failure(`Timeline worker exited (${code})`, 'TIMELINE_WORKER'));
+    });
+    worker.on('message', handleMessage);
+  }
   function request(operation, targetKey, value) {
     if (fatal) return Promise.reject(fatal);
     if (closed) return Promise.reject(failure('Timeline store is closed', 'TIMELINE_CLOSED'));
