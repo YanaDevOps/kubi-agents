@@ -17,27 +17,35 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
     strategy:
       matrix:
         include:
-          - target: bun-linux-x64
+          - runner: ubuntu-latest
+            target: bun-linux-x64
             artifact: kubi-agent-linux-amd64
-          - target: bun-linux-arm64
+          - runner: ubuntu-latest
+            target: bun-linux-arm64
             artifact: kubi-agent-linux-arm64
-          - target: bun-darwin-x64
+          - runner: macos-13
+            target: bun-darwin-x64
             artifact: kubi-agent-darwin-amd64
-          - target: bun-darwin-arm64
+          - runner: macos-14
+            target: bun-darwin-arm64
             artifact: kubi-agent-darwin-arm64
-          - target: bun-windows-x64
+          - runner: windows-latest
+            target: bun-windows-x64
             artifact: kubi-agent-windows-amd64.exe
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.9
-      - run: bun install --frozen-lockfile --ignore-scripts
+      - name: Install dependencies
+        shell: bash
+        run: bun install --frozen-lockfile --ignore-scripts
       - name: Build native agent
+        shell: bash
         env:
           KUBI_AGENT_VERSION: ${{ inputs.version || github.ref_name }}
           KUBI_AGENT_BUILD_ID: ${{ github.sha }}
@@ -48,9 +56,11 @@ jobs:
             --define KUBI_AGENT_COMPILED_BUILD_ID="\"${KUBI_AGENT_BUILD_ID}\"" \
             --outfile=dist/${{ matrix.artifact }}
       - name: Write checksum
+        shell: bash
         run: sha256sum dist/${{ matrix.artifact }} > dist/${{ matrix.artifact }}.sha256
       - name: Verify embedded release version
         if: matrix.target == 'bun-linux-x64'
+        shell: bash
         env:
           KUBI_AGENT_VERSION: ${{ inputs.version || github.ref_name }}
         run: |
