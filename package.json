@@ -19,8 +19,7 @@
     "@kubernetes/client-node": "^1.4.0",
     "cron-parser": "5.4.0",
     "ws": "^8.21.1",
-    "yaml": "^2.8.2",
-    "better-sqlite3": "^12.6.2"
+    "yaml": "^2.8.2"
   },
   "overrides": {
     "ip-address": "^10.3.1",
