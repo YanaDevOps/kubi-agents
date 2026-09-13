@@ -27,7 +27,7 @@ jobs:
           - runner: ubuntu-24.04-arm
             target: bun-linux-arm64
             artifact: kubi-agent-linux-arm64
-          - runner: macos-13
+          - runner: macos-14
             target: bun-darwin-x64
             artifact: kubi-agent-darwin-amd64
           - runner: macos-14
