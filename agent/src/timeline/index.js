@@ -6,6 +6,7 @@ import { DELIVERY_RESOURCE_DEFINITIONS } from '../../../src/shared/delivery-acti
 import { BACKUP_RESOURCE_DEFINITIONS } from '../../../src/shared/backup-activity.js';
 
 const POLL_MS = 15_000;
+const CYCLE_TIMEOUT_MS = 45_000;
 const MAX_ITEMS = 2_000;
 const BASELINE_SCHEMA_VERSION = 2;
 const CORE_SOURCE_DEFS = [
@@ -20,7 +21,8 @@ const CORE_SOURCE_DEFS = [
   ['persistentvolumes', '/api/v1/persistentvolumes', 'v1', 'PersistentVolume'],
   ['persistentvolumeclaims', '/api/v1/persistentvolumeclaims', 'v1', 'PersistentVolumeClaim'],
   ['events', '/api/v1/events', 'v1', 'Event'],
-  ['events.k8s.io', '/apis/events.k8s.io/v1/events', 'events.k8s.io/v1', 'Event']
+  ['events.k8s.io', '/apis/events.k8s.io/v1/events', 'events.k8s.io/v1', 'Event'],
+  ['customresourcedefinitions', '/apis/apiextensions.k8s.io/v1/customresourcedefinitions', 'apiextensions.k8s.io/v1', 'CustomResourceDefinition']
 ];
 
 const PROVIDER_SOURCE_DEFS = [...DELIVERY_RESOURCE_DEFINITIONS, ...BACKUP_RESOURCE_DEFINITIONS]
@@ -28,10 +30,10 @@ const PROVIDER_SOURCE_DEFS = [...DELIVERY_RESOURCE_DEFINITIONS, ...BACKUP_RESOUR
     `${definition.providerId}:${definition.resource}`,
     `/apis/${definition.group}/${definition.versions[0]}/${definition.resource}`,
     `${definition.group}/${definition.versions[0]}`,
-    definition.kind
+    definition.kind,
+    `${definition.resource}.${definition.group}`
   ])
   .filter(([, path], index, entries) => entries.findIndex(([, candidate]) => candidate === path) === index);
-const SOURCE_DEFS = [...CORE_SOURCE_DEFS, ...PROVIDER_SOURCE_DEFS];
 const LOG_REASONS = /restart|oom|crash|backoff|fail|evict/i;
 
 const keyOf = (object) => `${object?.apiVersion || ''}/${object?.kind || ''}/${object?.metadata?.uid || ''}`;
@@ -89,11 +91,43 @@ export function normalizeTimelineSourceItem(item, apiVersion, kind) {
   };
 }
 
-async function listSource(runtimeConfig, path, apiVersion, kind) {
+async function listSource(runtimeConfig, path, apiVersion, kind, signal) {
   const kubeConfig = runtimeConfig.__kubeConfig || runtimeConfig.kubeConfig || loadLocalKubeConfig(runtimeConfig);
-  const result = await fetchKubeList(kubeConfig, path, true, { pageLimit: 500, maxPages: 4 });
+  const result = await fetchKubeList(kubeConfig, path, true, {
+    pageLimit: 500,
+    maxPages: 4,
+    timeoutMs: 10_000,
+    signal
+  });
   return (result?.items || []).slice(0, MAX_ITEMS)
     .map((item) => normalizeTimelineSourceItem(item, apiVersion, kind));
+}
+
+export function selectTimelineProviderSources(crds) {
+  const installed = new Set((Array.isArray(crds) ? crds : [])
+    .map((crd) => crd?.metadata?.name)
+    .filter((name) => typeof name === 'string'));
+  return PROVIDER_SOURCE_DEFS.filter((definition) => installed.has(definition[4]));
+}
+
+export async function withTimelineCycleDeadline(operation, timeoutMs = CYCLE_TIMEOUT_MS) {
+  if (typeof operation !== 'function' || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1) {
+    throw new Error('Invalid Timeline cycle deadline.');
+  }
+  const controller = new AbortController();
+  let timer;
+  const deadline = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      const error = new Error(`Timeline collection cycle timed out after ${timeoutMs}ms.`);
+      controller.abort(error);
+      reject(error);
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([Promise.resolve().then(() => operation(controller.signal)), deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function emptyState() {
@@ -145,7 +179,7 @@ class TargetCollector {
     this.stopped = false;
     this.state = 'starting';
     this.message = '';
-    this.sources = SOURCE_DEFS.map(([id]) => ({ id, state: 'pending' }));
+    this.sources = CORE_SOURCE_DEFS.map(([id]) => ({ id, state: 'pending' }));
     this.lastObservedAt = null;
     this.baseline = emptyState();
   }
@@ -178,11 +212,23 @@ class TargetCollector {
     const observedAt = new Date().toISOString();
     try {
       const resolved = resolveAgentRuntimeConfigForSelector(this.manager.runtimeConfig, this.target.connectionSelector);
-      const results = await Promise.allSettled(SOURCE_DEFS.map(([, path, apiVersion, kind]) => listSource(resolved, path, apiVersion, kind)));
+      const { definitions, results } = await withTimelineCycleDeadline(async (signal) => {
+        const coreResults = await Promise.allSettled(CORE_SOURCE_DEFS.map(([, path, apiVersion, kind]) =>
+          listSource(resolved, path, apiVersion, kind, signal)));
+        const crdIndex = CORE_SOURCE_DEFS.findIndex(([id]) => id === 'customresourcedefinitions');
+        const crdResult = coreResults[crdIndex];
+        const providerDefinitions = crdResult?.status === 'fulfilled'
+          ? selectTimelineProviderSources(crdResult.value)
+          : [];
+        const providerResults = await Promise.allSettled(providerDefinitions.map(([, path, apiVersion, kind]) =>
+          listSource(resolved, path, apiVersion, kind, signal)));
+        return { definitions: [...CORE_SOURCE_DEFS, ...providerDefinitions], results: [...coreResults, ...providerResults] };
+      });
       const next = { schemaVersion: BASELINE_SCHEMA_VERSION, initialized: true, sources: {}, lastObservedAt: observedAt, gaps: 0 };
       let failures = 0;
+      this.sources = definitions.map(([id]) => ({ id, state: 'pending' }));
       results.forEach((result, index) => {
-        const [id] = SOURCE_DEFS[index];
+        const [id] = definitions[index];
         if (result.status === 'rejected') {
           failures += 1;
           next.gaps += 1;

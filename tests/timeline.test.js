@@ -2,10 +2,38 @@ import { describe, expect, test } from 'bun:test';
 import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { normalizeTimelineSourceItem, reduceTimelineSnapshot, restoreTimelineBaseline } from '../agent/src/timeline/index.js';
+import {
+  normalizeTimelineSourceItem,
+  reduceTimelineSnapshot,
+  restoreTimelineBaseline,
+  selectTimelineProviderSources,
+  withTimelineCycleDeadline
+} from '../agent/src/timeline/index.js';
 import { createTimelineStore } from '../agent/src/timeline/store.js';
 
 describe('cluster Timeline collection', () => {
+  test('polls only provider resources backed by installed CRDs', () => {
+    const selected = selectTimelineProviderSources([
+      { metadata: { name: 'applications.argoproj.io' } },
+      { metadata: { name: 'backups.velero.io' } },
+      { metadata: { name: 42 } },
+      null
+    ]).map((definition) => definition[4]);
+    expect(selected).toContain('applications.argoproj.io');
+    expect(selected).toContain('backups.velero.io');
+    expect(selected).not.toContain('helmreleases.helm.toolkit.fluxcd.io');
+    expect(selectTimelineProviderSources(null)).toEqual([]);
+  });
+
+  test('aborts a collection cycle that exceeds its deadline', async () => {
+    let signal;
+    await expect(withTimelineCycleDeadline((currentSignal) => {
+      signal = currentSignal;
+      return new Promise((_, reject) => currentSignal.addEventListener('abort', () => reject(currentSignal.reason), { once: true }));
+    }, 5)).rejects.toThrow('Timeline collection cycle timed out after 5ms.');
+    expect(signal.aborted).toBe(true);
+  });
+
   test('rejects an unbounded worker request lifetime', async () => {
     await expect(createTimelineStore({ requestTimeoutMs: 0 })).rejects.toThrow('Invalid requestTimeoutMs');
   });
