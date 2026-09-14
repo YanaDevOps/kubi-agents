@@ -6,6 +6,10 @@ import { normalizeTimelineSourceItem, reduceTimelineSnapshot, restoreTimelineBas
 import { createTimelineStore } from '../agent/src/timeline/store.js';
 
 describe('cluster Timeline collection', () => {
+  test('rejects an unbounded worker request lifetime', async () => {
+    await expect(createTimelineStore({ requestTimeoutMs: 0 })).rejects.toThrow('Invalid requestTimeoutMs');
+  });
+
   test('restores omitted List TypeMeta and safely migrates older baselines', () => {
     expect(normalizeTimelineSourceItem(
       { metadata: { name: 'api', uid: 'deploy-1' } },

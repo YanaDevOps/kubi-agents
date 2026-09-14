@@ -22,9 +22,9 @@ function defaultDirectory() {
  */
 export async function createTimelineStore({
   directory = defaultDirectory(), maxTargetBytes = 100 * MiB, maxTotalBytes = 512 * MiB,
-  maxQueue = 64, maxRequestBytes = MiB, maxStateBytes = 256 * 1024,
+  maxQueue = 64, maxRequestBytes = MiB, maxStateBytes = 256 * 1024, requestTimeoutMs = 15_000,
 } = {}) {
-  for (const [key, value] of Object.entries({ maxTargetBytes, maxTotalBytes, maxQueue, maxRequestBytes, maxStateBytes })) {
+  for (const [key, value] of Object.entries({ maxTargetBytes, maxTotalBytes, maxQueue, maxRequestBytes, maxStateBytes, requestTimeoutMs })) {
     if (!Number.isSafeInteger(value) || value < 1) throw failure(`Invalid ${key}`, 'TIMELINE_INVALID');
   }
   // A parent launched with --input-type=module (common in smoke tests) cannot
@@ -45,13 +45,17 @@ export async function createTimelineStore({
   let closing;
   const fail = (error) => {
     fatal = failure(error.message || 'Timeline worker stopped', error.code || 'TIMELINE_WORKER');
-    for (const request of pending.values()) request.reject(fatal);
+    for (const request of pending.values()) {
+      clearTimeout(request.timer);
+      request.reject(fatal);
+    }
     pending.clear();
   };
   const handleMessage = ({ id, result, error }) => {
     const request = pending.get(id);
     if (!request) return;
     pending.delete(id);
+    clearTimeout(request.timer);
     if (error) request.reject(failure(error.message, error.code));
     else request.resolve(result);
   };
@@ -79,9 +83,17 @@ export async function createTimelineStore({
     } catch (error) { return Promise.reject(error); }
     return new Promise((resolve, reject) => {
       const id = ++sequence;
-      pending.set(id, { resolve, reject });
+      const timer = setTimeout(() => {
+        pending.delete(id);
+        reject(failure(`Timeline worker request timed out (${operation})`, 'TIMELINE_TIMEOUT'));
+      }, requestTimeoutMs);
+      pending.set(id, { resolve, reject, timer });
       try { worker.postMessage({ id, operation, targetKey, payload }); }
-      catch (error) { pending.delete(id); reject(error); }
+      catch (error) {
+        pending.delete(id);
+        clearTimeout(timer);
+        reject(error);
+      }
     });
   }
   try {
@@ -107,7 +119,11 @@ export async function createTimelineStore({
         try {
           if (!fatal) await new Promise((resolve, reject) => {
             const id = ++sequence;
-            pending.set(id, { resolve, reject });
+            const timer = setTimeout(() => {
+              pending.delete(id);
+              reject(failure('Timeline worker request timed out (close)', 'TIMELINE_TIMEOUT'));
+            }, requestTimeoutMs);
+            pending.set(id, { resolve, reject, timer });
             worker.postMessage({ id, operation: 'close', targetKey: null, payload: 'null' });
           });
         } finally { await worker.terminate(); }

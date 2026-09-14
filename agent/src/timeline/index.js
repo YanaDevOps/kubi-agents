@@ -142,6 +142,7 @@ class TargetCollector {
     this.key = targetKey(target);
     this.timer = null;
     this.running = false;
+    this.stopped = false;
     this.state = 'starting';
     this.message = '';
     this.sources = SOURCE_DEFS.map(([id]) => ({ id, state: 'pending' }));
@@ -150,6 +151,7 @@ class TargetCollector {
   }
 
   async start() {
+    this.stopped = false;
     const restored = await this.manager.store.getState(this.key);
     this.baseline = restoreTimelineBaseline(restored);
     await this.collect();
@@ -157,7 +159,7 @@ class TargetCollector {
   }
 
   schedule() {
-    if (this.timer || this.manager.closed) return;
+    if (this.timer || this.stopped || this.manager.closed) return;
     this.timer = setTimeout(() => {
       this.timer = null;
       void this.collect().finally(() => this.schedule());
@@ -165,6 +167,7 @@ class TargetCollector {
   }
 
   async stop() {
+    this.stopped = true;
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
   }
@@ -260,6 +263,8 @@ export function createTimelineManager({ runtimeConfig, logger = console } = {}) 
           void collector.start().catch((error) => logger.warn(`Timeline collector failed: ${error.message}`));
         } else {
           collector.target = target;
+          // Heartbeats also repair a timer lost to a runtime/worker interruption.
+          collector.schedule();
         }
         await store.get().then((value) => value.prune(key, { retentionDays: target.retentionDays })).catch((error) => logger.warn(`Timeline retention update failed: ${error.message}`));
       }
