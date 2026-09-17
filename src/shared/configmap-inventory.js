@@ -63,6 +63,63 @@ function referenceKey(namespace, name) {
   return `${namespace || 'default'}/${name}`;
 }
 
+const CONSUMER_KIND_ORDER = new Map([
+  ['pod', 0],
+  ['deployment', 1],
+  ['statefulset', 2],
+  ['daemonset', 3],
+  ['job', 4],
+  ['cronjob', 5]
+]);
+
+function consumerSort(left, right) {
+  const leftKind = String(left.kind || '').toLowerCase();
+  const rightKind = String(right.kind || '').toLowerCase();
+  const rank = (CONSUMER_KIND_ORDER.get(leftKind) ?? 20) - (CONSUMER_KIND_ORDER.get(rightKind) ?? 20);
+  return rank || leftKind.localeCompare(rightKind) || left.namespace.localeCompare(right.namespace) || left.name.localeCompare(right.name);
+}
+
+function configMapConsumers(references) {
+  const consumers = new Map();
+  for (const reference of records(references)) {
+    const kind = String(reference.kind || reference.consumerKind || '').trim() || 'Other';
+    const name = String(reference.name || reference.consumerName || '').trim();
+    const namespace = String(reference.namespace || '').trim() || 'default';
+    if (!name) continue;
+    const key = `${kind.toLowerCase()}:${namespace}/${name}`;
+    const current = consumers.get(key) || {
+      kind,
+      name,
+      namespace,
+      confidence: 'inferred',
+      methods: new Set(),
+      referenceCount: 0
+    };
+    const method = String(reference.method || '').trim();
+    if (method) current.methods.add(method);
+    if (reference.confidence !== 'inferred') current.confidence = 'exact';
+    current.referenceCount += 1;
+    consumers.set(key, current);
+  }
+  return [...consumers.values()]
+    .map((consumer) => ({ ...consumer, methods: [...consumer.methods].sort((left, right) => left.localeCompare(right)) }))
+    .sort(consumerSort);
+}
+
+function normalizedConsumers(value) {
+  return records(value)
+    .map((consumer) => ({
+      kind: String(consumer.kind || '').trim() || 'Other',
+      name: String(consumer.name || '').trim(),
+      namespace: String(consumer.namespace || '').trim() || 'default',
+      confidence: consumer.confidence === 'inferred' ? 'inferred' : 'exact',
+      methods: [...new Set(Array.isArray(consumer.methods) ? consumer.methods.map((method) => String(method || '').trim()).filter(Boolean) : [])].sort((left, right) => left.localeCompare(right)),
+      referenceCount: Math.max(0, Number(consumer.referenceCount) || 0)
+    }))
+    .filter((consumer) => consumer.name)
+    .sort(consumerSort);
+}
+
 function base64Bytes(value) {
   const normalized = value.replace(/\s/g, '');
   if (!normalized) return 0;
@@ -108,6 +165,7 @@ export function buildConfigMapInventory(input) {
     const data = strings(configMap.data);
     const binaryData = strings(configMap.binaryData);
     const referencedBy = referencesByConfigMap.get(referenceKey(meta.namespace, meta.name)) || [];
+    const consumers = configMapConsumers(referencedBy);
     const classification = classifySystemConfigMap(configMap);
     const ownerKinds = [...new Set(meta.owners.map((owner) => String(owner.kind || '')).filter(Boolean))];
     const managedBy = meta.labels['app.kubernetes.io/managed-by'] || ownerKinds[0];
@@ -125,7 +183,9 @@ export function buildConfigMapInventory(input) {
       totalBytes: Object.values(data).reduce((total, value) => total + textBytes(value), 0) +
         Object.values(binaryData).reduce((total, value) => total + base64Bytes(value), 0),
       immutable: configMap.immutable === true,
-      referenceCount: referencedBy.length,
+      referenceCount: consumers.length,
+      referencePathCount: referencedBy.length,
+      consumers,
       referencedBy,
       referencesVerified,
       systemManaged: classification.systemManaged,
@@ -169,10 +229,20 @@ export function sanitizeConfigMapSummary(value) {
     }))
     .filter((entry) => entry.key);
   const omittedByKey = new Map([...existingOmitted, ...annotationMetadata.omittedAnnotations].map((entry) => [entry.key, entry]));
+  const hasReferencePaths = Array.isArray(item.referencedBy);
+  const referencedBy = records(item.referencedBy);
+  const consumers = hasReferencePaths ? configMapConsumers(referencedBy) : normalizedConsumers(item.consumers);
+  const legacyReferenceCount = Math.max(0, Number(item.referenceCount) || 0);
   return {
     ...safeItem,
     annotations: annotationMetadata.annotations,
-    omittedAnnotations: [...omittedByKey.values()].sort((left, right) => left.key.localeCompare(right.key))
+    omittedAnnotations: [...omittedByKey.values()].sort((left, right) => left.key.localeCompare(right.key)),
+    referenceCount: hasReferencePaths || consumers.length ? consumers.length : legacyReferenceCount,
+    referencePathCount: hasReferencePaths
+      ? referencedBy.length
+      : Math.max(0, Number(item.referencePathCount) || legacyReferenceCount),
+    consumers,
+    referencedBy
   };
 }
 
