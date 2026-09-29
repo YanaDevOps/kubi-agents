@@ -9,7 +9,8 @@ import {
   restoreTimelineBaseline,
   settleTimelineSources,
   selectTimelineProviderSources,
-  withTimelineCycleDeadline
+  withTimelineCycleDeadline,
+  withTimelineSourceDeadline
 } from '../agent/src/timeline/index.js';
 import { createTimelineStore } from '../agent/src/timeline/store.js';
 
@@ -54,6 +55,15 @@ describe('cluster Timeline collection', () => {
       'fulfilled', 'fulfilled', 'fulfilled', 'rejected', 'fulfilled', 'fulfilled'
     ]);
     expect(results[4]).toEqual({ status: 'fulfilled', value: 8 });
+  });
+
+  test('bounds the complete paginated lifetime of one Timeline source', async () => {
+    let sourceSignal;
+    await expect(withTimelineSourceDeadline((signal) => {
+      sourceSignal = signal;
+      return new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
+    }, undefined, 5)).rejects.toThrow('Timeline source timed out after 5ms.');
+    expect(sourceSignal.aborted).toBe(true);
   });
 
   test('keeps a dense Kubernetes event baseline below the worker request limit', () => {

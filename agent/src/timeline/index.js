@@ -10,7 +10,8 @@ const CYCLE_TIMEOUT_MS = 45_000;
 const MAX_ITEMS = 2_000;
 const MAX_EVENT_ITEMS = 750;
 const MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
-const SOURCE_CONCURRENCY = 3;
+const SOURCE_CONCURRENCY = 4;
+const SOURCE_TIMEOUT_MS = 6_000;
 const BASELINE_SCHEMA_VERSION = 2;
 const CORE_SOURCE_DEFS = [
   ['pods', '/api/v1/pods', 'v1', 'Pod'],
@@ -183,17 +184,34 @@ export function normalizeTimelineSourceItem(item, apiVersion, kind) {
 
 async function listSource(runtimeConfig, path, apiVersion, kind, signal) {
   const kubeConfig = runtimeConfig.__kubeConfig || runtimeConfig.kubeConfig || loadLocalKubeConfig(runtimeConfig);
-  const result = await fetchKubeList(kubeConfig, path, true, {
+  const result = await withTimelineSourceDeadline((sourceSignal) => fetchKubeList(kubeConfig, path, true, {
     pageLimit: kind === 'Event' ? 250 : 500,
     maxPages: kind === 'Event' ? 3 : 4,
-    timeoutMs: 10_000,
+    timeoutMs: SOURCE_TIMEOUT_MS,
     maxBytes: MAX_RESPONSE_BYTES,
-    signal
-  });
+    signal: sourceSignal
+  }), signal);
   const limit = kind === 'Event' ? MAX_EVENT_ITEMS : MAX_ITEMS;
   return (result?.items || []).slice(0, limit)
     .map((item) => projectTimelineSourceItem(item, apiVersion, kind))
     .filter(Boolean);
+}
+
+export async function withTimelineSourceDeadline(operation, parentSignal, timeoutMs = SOURCE_TIMEOUT_MS) {
+  if (typeof operation !== 'function' || !Number.isSafeInteger(timeoutMs) || timeoutMs < 1) {
+    throw new Error('Invalid Timeline source deadline.');
+  }
+  parentSignal?.throwIfAborted();
+  const controller = new AbortController();
+  const abortFromParent = () => controller.abort(parentSignal.reason || new Error('Timeline collection was cancelled.'));
+  const timer = setTimeout(() => controller.abort(new Error(`Timeline source timed out after ${timeoutMs}ms.`)), timeoutMs);
+  parentSignal?.addEventListener('abort', abortFromParent, { once: true });
+  try {
+    return await operation(controller.signal);
+  } finally {
+    clearTimeout(timer);
+    parentSignal?.removeEventListener('abort', abortFromParent);
+  }
 }
 
 export function projectTimelineSourceItem(item, apiVersion, kind) {
