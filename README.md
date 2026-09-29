@@ -192,12 +192,14 @@ Agent `v0.1.48` corrects the packaged Timeline worker path in standalone release
 binaries. Release CI runs `kubi-agent diagnostics timeline-store` against the
 compiled Linux artifact before publication.
 
-Agent `v0.1.55` records resources and meaningful Kubernetes Events first seen
+Agent `v0.1.56` records resources and meaningful Kubernetes Events first seen
 after the baseline, preserves complete feed/detail fields in SQLite, restores
 transition baselines after restart, restores TypeMeta omitted by Kubernetes
 List responses, reports the applied settings revision, repairs polling from
 heartbeats, bounds SQLite worker request latency, and polls provider resources
-only when their CRDs are installed.
+only when their CRDs are installed. Event snapshots are compacted before they
+enter the baseline and source reads use bounded concurrency, preventing large
+clusters from retaining full Kubernetes API responses in agent memory.
 
 ConfigMap inventory groups env, volume, argument, and controller reference paths
 by unique Pod, workload template, or recognized controller. The API reports the

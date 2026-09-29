@@ -8,6 +8,9 @@ import { BACKUP_RESOURCE_DEFINITIONS } from '../../../src/shared/backup-activity
 const POLL_MS = 15_000;
 const CYCLE_TIMEOUT_MS = 45_000;
 const MAX_ITEMS = 2_000;
+const MAX_EVENT_ITEMS = 750;
+const MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
+const SOURCE_CONCURRENCY = 3;
 const BASELINE_SCHEMA_VERSION = 2;
 const CORE_SOURCE_DEFS = [
   ['pods', '/api/v1/pods', 'v1', 'Pod'],
@@ -41,6 +44,67 @@ const targetKey = (target) => createHash('sha256').update(JSON.stringify([
   target.workspaceId, target.agentId, target.connectionId, target.connectionSelector
 ])).digest('hex');
 
+const compactCondition = (condition) => condition && typeof condition === 'object' ? {
+  type: condition.type,
+  status: condition.status,
+  reason: condition.reason,
+  lastTransitionTime: condition.lastTransitionTime
+} : null;
+
+const compactContainerState = (state) => state && typeof state === 'object' ? {
+  ...(state.waiting ? { waiting: { reason: state.waiting.reason } } : {}),
+  ...(state.running ? { running: { startedAt: state.running.startedAt } } : {}),
+  ...(state.terminated ? { terminated: {
+    reason: state.terminated.reason,
+    exitCode: state.terminated.exitCode,
+    finishedAt: state.terminated.finishedAt
+  } } : {})
+} : undefined;
+
+const compactContainerStatus = (status) => status && typeof status === 'object' ? {
+  name: status.name,
+  ready: status.ready,
+  restartCount: status.restartCount,
+  state: compactContainerState(status.state),
+  lastState: compactContainerState(status.lastState)
+} : null;
+
+function projectStatus(status) {
+  if (!status || typeof status !== 'object') return undefined;
+  const conditions = Array.isArray(status.conditions) ? status.conditions.map(compactCondition).filter(Boolean) : undefined;
+  const containers = (field) => Array.isArray(status[field])
+    ? status[field].map(compactContainerStatus).filter(Boolean)
+    : undefined;
+  return {
+    phase: status.phase,
+    reason: status.reason,
+    conditions,
+    containerStatuses: containers('containerStatuses'),
+    initContainerStatuses: containers('initContainerStatuses'),
+    ephemeralContainerStatuses: containers('ephemeralContainerStatuses'),
+    currentRevision: status.currentRevision,
+    updateRevision: status.updateRevision,
+    readyReplicas: status.readyReplicas,
+    availableReplicas: status.availableReplicas,
+    observedGeneration: status.observedGeneration,
+    nodeInfo: status.nodeInfo ? { kubeletVersion: status.nodeInfo.kubeletVersion } : undefined,
+    health: status.health ? { status: status.health.status } : undefined,
+    sync: status.sync ? { status: status.sync.status, revision: status.sync.revision } : undefined,
+    operationState: status.operationState ? { phase: status.operationState.phase, finishedAt: status.operationState.finishedAt } : undefined,
+    readyToUse: status.readyToUse,
+    lastAppliedRevision: status.lastAppliedRevision,
+    lastAttemptedRevision: status.lastAttemptedRevision,
+    observedSourceArtifactRevision: status.observedSourceArtifactRevision,
+    artifact: status.artifact ? { revision: status.artifact.revision } : undefined,
+    completionTimestamp: status.completionTimestamp,
+    completedAt: status.completedAt,
+    endTime: status.endTime,
+    error: Boolean(status.error),
+    failureReason: status.failureReason,
+    errors: Array.isArray(status.errors) ? status.errors.length : status.errors
+  };
+}
+
 function project(object) {
   if (!object?.metadata?.uid || !object?.apiVersion || !object?.kind) return null;
   return {
@@ -58,28 +122,54 @@ function project(object) {
       replicas: object.spec.replicas,
       suspend: object.spec.suspend,
       unschedulable: object.spec.unschedulable,
-      template: object.spec.template ? { spec: { containers: (object.spec.template.spec?.containers || []).map(({ name, image }) => ({ name, image })) } } : undefined
+      template: object.spec.template ? { spec: {
+        containers: (object.spec.template.spec?.containers || []).map(({ name, image }) => ({ name, image })),
+        initContainers: (object.spec.template.spec?.initContainers || []).map(({ name, image }) => ({ name, image }))
+      } } : undefined
     } : undefined,
-    status: object.status ? {
-      phase: object.status.phase,
-      reason: object.status.reason,
-      conditions: object.status.conditions,
-      containerStatuses: object.status.containerStatuses,
-      initContainerStatuses: object.status.initContainerStatuses,
-      ephemeralContainerStatuses: object.status.ephemeralContainerStatuses,
-      currentRevision: object.status.currentRevision,
-      updateRevision: object.status.updateRevision,
-      readyReplicas: object.status.readyReplicas,
-      availableReplicas: object.status.availableReplicas,
-      observedGeneration: object.status.observedGeneration,
-      nodeInfo: object.status.nodeInfo
-    } : undefined
+    status: projectStatus(object.status)
+  };
+}
+
+function compactObjectReference(reference) {
+  if (!reference || typeof reference !== 'object') return undefined;
+  return {
+    apiVersion: reference.apiVersion,
+    kind: reference.kind,
+    namespace: reference.namespace,
+    name: reference.name,
+    uid: reference.uid
   };
 }
 
 function eventProject(object) {
   if (!object?.metadata?.uid) return null;
-  return { ...object, metadata: { uid: object.metadata.uid, creationTimestamp: object.metadata.creationTimestamp } };
+  return {
+    apiVersion: object.apiVersion,
+    kind: object.kind,
+    metadata: {
+      uid: object.metadata.uid,
+      resourceVersion: object.metadata.resourceVersion,
+      creationTimestamp: object.metadata.creationTimestamp
+    },
+    involvedObject: compactObjectReference(object.involvedObject),
+    regarding: compactObjectReference(object.regarding),
+    type: object.type,
+    reason: object.reason,
+    note: typeof object.note === 'string' ? object.note.slice(0, 4096) : undefined,
+    message: typeof object.message === 'string' ? object.message.slice(0, 4096) : undefined,
+    count: object.count,
+    deprecatedCount: object.deprecatedCount,
+    firstTimestamp: object.firstTimestamp,
+    lastTimestamp: object.lastTimestamp,
+    eventTime: object.eventTime,
+    deprecatedFirstTimestamp: object.deprecatedFirstTimestamp,
+    deprecatedLastTimestamp: object.deprecatedLastTimestamp,
+    series: object.series ? {
+      count: object.series.count,
+      lastObservedTime: object.series.lastObservedTime
+    } : undefined
+  };
 }
 
 export function normalizeTimelineSourceItem(item, apiVersion, kind) {
@@ -94,13 +184,41 @@ export function normalizeTimelineSourceItem(item, apiVersion, kind) {
 async function listSource(runtimeConfig, path, apiVersion, kind, signal) {
   const kubeConfig = runtimeConfig.__kubeConfig || runtimeConfig.kubeConfig || loadLocalKubeConfig(runtimeConfig);
   const result = await fetchKubeList(kubeConfig, path, true, {
-    pageLimit: 500,
-    maxPages: 4,
+    pageLimit: kind === 'Event' ? 250 : 500,
+    maxPages: kind === 'Event' ? 3 : 4,
     timeoutMs: 10_000,
+    maxBytes: MAX_RESPONSE_BYTES,
     signal
   });
-  return (result?.items || []).slice(0, MAX_ITEMS)
-    .map((item) => normalizeTimelineSourceItem(item, apiVersion, kind));
+  const limit = kind === 'Event' ? MAX_EVENT_ITEMS : MAX_ITEMS;
+  return (result?.items || []).slice(0, limit)
+    .map((item) => projectTimelineSourceItem(item, apiVersion, kind))
+    .filter(Boolean);
+}
+
+export function projectTimelineSourceItem(item, apiVersion, kind) {
+  const normalized = normalizeTimelineSourceItem(item, apiVersion, kind);
+  return kind === 'Event' ? eventProject(normalized) : project(normalized);
+}
+
+export async function settleTimelineSources(definitions, loader, concurrency = SOURCE_CONCURRENCY) {
+  if (!Array.isArray(definitions) || typeof loader !== 'function' || !Number.isSafeInteger(concurrency) || concurrency < 1) {
+    throw new Error('Invalid Timeline source collection parameters.');
+  }
+  const results = new Array(definitions.length);
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(concurrency, definitions.length) }, async () => {
+    while (cursor < definitions.length) {
+      const index = cursor++;
+      try {
+        results[index] = { status: 'fulfilled', value: await loader(definitions[index], index) };
+      } catch (reason) {
+        results[index] = { status: 'rejected', reason };
+      }
+    }
+  });
+  await Promise.all(workers);
+  return results;
 }
 
 export function selectTimelineProviderSources(crds) {
@@ -213,15 +331,15 @@ class TargetCollector {
     try {
       const resolved = resolveAgentRuntimeConfigForSelector(this.manager.runtimeConfig, this.target.connectionSelector);
       const { definitions, results } = await withTimelineCycleDeadline(async (signal) => {
-        const coreResults = await Promise.allSettled(CORE_SOURCE_DEFS.map(([, path, apiVersion, kind]) =>
-          listSource(resolved, path, apiVersion, kind, signal)));
+        const coreResults = await settleTimelineSources(CORE_SOURCE_DEFS, ([, path, apiVersion, kind]) =>
+          listSource(resolved, path, apiVersion, kind, signal));
         const crdIndex = CORE_SOURCE_DEFS.findIndex(([id]) => id === 'customresourcedefinitions');
         const crdResult = coreResults[crdIndex];
         const providerDefinitions = crdResult?.status === 'fulfilled'
           ? selectTimelineProviderSources(crdResult.value)
           : [];
-        const providerResults = await Promise.allSettled(providerDefinitions.map(([, path, apiVersion, kind]) =>
-          listSource(resolved, path, apiVersion, kind, signal)));
+        const providerResults = await settleTimelineSources(providerDefinitions, ([, path, apiVersion, kind]) =>
+          listSource(resolved, path, apiVersion, kind, signal));
         return { definitions: [...CORE_SOURCE_DEFS, ...providerDefinitions], results: [...coreResults, ...providerResults] };
       });
       const next = { schemaVersion: BASELINE_SCHEMA_VERSION, initialized: true, sources: {}, lastObservedAt: observedAt, gaps: 0 };
@@ -235,8 +353,7 @@ class TargetCollector {
           this.sources[index] = { id, state: 'unavailable', message: result.reason instanceof Error ? result.reason.message : 'Source unavailable' };
           return;
         }
-        const projected = result.value.map((item) => id.startsWith('events') ? eventProject(item) : project(item)).filter(Boolean);
-        next.sources[id] = Object.fromEntries(projected.map((item) => [keyOf(item), item]));
+        next.sources[id] = Object.fromEntries(result.value.map((item) => [keyOf(item), item]));
         this.sources[index] = { id, state: 'collecting', lastObservedAt: observedAt };
       });
       if (this.baseline.initialized) {
