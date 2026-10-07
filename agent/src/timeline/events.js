@@ -333,7 +333,7 @@ const MEANINGFUL_NORMAL_REASONS = new Set([
   'ReconciliationFailed', 'HealthStatusChanged', 'OperationCompleted', 'OperationFailed', 'BackupCompleted', 'BackupFailed', 'RestoreCompleted', 'RestoreFailed'
 ]);
 
-function eventOccurrence(object) {
+export function eventOccurrence(object) {
   return {
     count: count(object?.series?.count) ?? count(object?.count) ?? count(object?.deprecatedCount) ?? 1,
     time: timestamp(object?.series?.lastObservedTime, object?.lastTimestamp, object?.deprecatedLastTimestamp, object?.eventTime, object?.firstTimestamp, object?.metadata?.creationTimestamp)

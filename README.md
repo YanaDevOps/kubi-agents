@@ -203,6 +203,12 @@ clusters from retaining full Kubernetes API responses in agent memory. A
 per-source deadline also isolates slow paginated APIs instead of blocking an
 entire collection cycle.
 
+Agent `v0.1.58` stops Timeline from replaying the same changes on every poll
+when its baseline cannot be persisted, stores Kubernetes Events in the baseline
+as compact count/time observations, skips observations already outside
+retention, and enforces SQLite quotas without a full `VACUUM` after every
+expiry. Upgrade in place; the first poll after upgrade starts a fresh baseline.
+
 ConfigMap inventory groups env, volume, argument, and controller reference paths
 by unique Pod, workload template, or recognized controller. The API reports the
 consumer count separately from the underlying reference-path count so repeated

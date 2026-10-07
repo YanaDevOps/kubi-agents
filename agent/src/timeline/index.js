@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { createTimelineStore } from './store.js';
-import { reduceTimelineEvents, reduceTimelineLifecycle } from './events.js';
+import { eventOccurrence, reduceTimelineEvents, reduceTimelineLifecycle } from './events.js';
 import { fetchKubeList, loadLocalKubeConfig, loadLocalPodLogs, resolveAgentRuntimeConfigForSelector } from '../kube.js';
 import { DELIVERY_RESOURCE_DEFINITIONS } from '../../../src/shared/delivery-activity.js';
 import { BACKUP_RESOURCE_DEFINITIONS } from '../../../src/shared/backup-activity.js';
@@ -12,7 +12,8 @@ const MAX_EVENT_ITEMS = 750;
 const MAX_RESPONSE_BYTES = 16 * 1024 * 1024;
 const SOURCE_CONCURRENCY = 4;
 const SOURCE_TIMEOUT_MS = 6_000;
-const BASELINE_SCHEMA_VERSION = 2;
+// Version 3 stores Kubernetes Events as compact [count, time] observations.
+const BASELINE_SCHEMA_VERSION = 3;
 const CORE_SOURCE_DEFS = [
   ['pods', '/api/v1/pods', 'v1', 'Pod'],
   ['nodes', '/api/v1/nodes', 'v1', 'Node'],
@@ -274,6 +275,26 @@ export function restoreTimelineBaseline(state) {
   return state?.schemaVersion === BASELINE_SCHEMA_VERSION ? state : emptyState();
 }
 
+// Event reducers compare only the series count and time with the previous
+// observation, so the baseline keeps that pair instead of the Event payload.
+export function compactTimelineBaselineItem(item) {
+  if (item?.kind !== 'Event') return item;
+  const { count, time } = eventOccurrence(item);
+  return [count, time];
+}
+
+function expandTimelineBaselineItem(item, key) {
+  if (!Array.isArray(item)) return item;
+  const uidAt = key.lastIndexOf('/');
+  return {
+    apiVersion: key.slice(0, key.lastIndexOf('/', uidAt - 1)),
+    kind: 'Event',
+    metadata: { uid: key.slice(uidAt + 1) },
+    count: item[0],
+    lastTimestamp: item[1] ?? undefined
+  };
+}
+
 export function reduceTimelineSnapshot(baseline, sources, observedAt) {
   if (!baseline?.initialized) return [];
   const events = [];
@@ -283,7 +304,7 @@ export function reduceTimelineSnapshot(baseline, sources, observedAt) {
     // evidence that every object was just created.
     if (!previousObjects) continue;
     for (const [key, current] of Object.entries(objects || {})) {
-      const previous = previousObjects[key];
+      const previous = expandTimelineBaselineItem(previousObjects[key], key);
       events.push(...(previous
         ? reduceTimelineEvents(previous, current, { observedAt })
         : current?.kind === 'Event'
@@ -292,11 +313,28 @@ export function reduceTimelineSnapshot(baseline, sources, observedAt) {
     }
     for (const [key, previous] of Object.entries(previousObjects)) {
       if (!Object.hasOwn(objects || {}, key)) {
-        events.push(...reduceTimelineLifecycle(previous, null, { observedAt }));
+        events.push(...reduceTimelineLifecycle(expandTimelineBaselineItem(previous, key), null, { observedAt }));
       }
     }
   }
   return events;
+}
+
+async function loadTimelineSources(runtimeConfig, target) {
+  const resolved = resolveAgentRuntimeConfigForSelector(runtimeConfig, target.connectionSelector);
+  const collected = await withTimelineCycleDeadline(async (signal) => {
+    const coreResults = await settleTimelineSources(CORE_SOURCE_DEFS, ([, path, apiVersion, kind]) =>
+      listSource(resolved, path, apiVersion, kind, signal));
+    const crdIndex = CORE_SOURCE_DEFS.findIndex(([id]) => id === 'customresourcedefinitions');
+    const crdResult = coreResults[crdIndex];
+    const providerDefinitions = crdResult?.status === 'fulfilled'
+      ? selectTimelineProviderSources(crdResult.value)
+      : [];
+    const providerResults = await settleTimelineSources(providerDefinitions, ([, path, apiVersion, kind]) =>
+      listSource(resolved, path, apiVersion, kind, signal));
+    return { definitions: [...CORE_SOURCE_DEFS, ...providerDefinitions], results: [...coreResults, ...providerResults] };
+  });
+  return { ...collected, resolved };
 }
 
 async function appendEvents(store, key, events) {
@@ -333,7 +371,7 @@ class TargetCollector {
     this.timer = setTimeout(() => {
       this.timer = null;
       void this.collect().finally(() => this.schedule());
-    }, POLL_MS);
+    }, this.manager.pollMs);
   }
 
   async stop() {
@@ -347,20 +385,9 @@ class TargetCollector {
     this.running = true;
     const observedAt = new Date().toISOString();
     try {
-      const resolved = resolveAgentRuntimeConfigForSelector(this.manager.runtimeConfig, this.target.connectionSelector);
-      const { definitions, results } = await withTimelineCycleDeadline(async (signal) => {
-        const coreResults = await settleTimelineSources(CORE_SOURCE_DEFS, ([, path, apiVersion, kind]) =>
-          listSource(resolved, path, apiVersion, kind, signal));
-        const crdIndex = CORE_SOURCE_DEFS.findIndex(([id]) => id === 'customresourcedefinitions');
-        const crdResult = coreResults[crdIndex];
-        const providerDefinitions = crdResult?.status === 'fulfilled'
-          ? selectTimelineProviderSources(crdResult.value)
-          : [];
-        const providerResults = await settleTimelineSources(providerDefinitions, ([, path, apiVersion, kind]) =>
-          listSource(resolved, path, apiVersion, kind, signal));
-        return { definitions: [...CORE_SOURCE_DEFS, ...providerDefinitions], results: [...coreResults, ...providerResults] };
-      });
+      const { definitions, results, resolved } = await this.manager.loadSources(this.target);
       const next = { schemaVersion: BASELINE_SCHEMA_VERSION, initialized: true, sources: {}, lastObservedAt: observedAt, gaps: 0 };
+      const current = {};
       let failures = 0;
       this.sources = definitions.map(([id]) => ({ id, state: 'pending' }));
       results.forEach((result, index) => {
@@ -371,11 +398,12 @@ class TargetCollector {
           this.sources[index] = { id, state: 'unavailable', message: result.reason instanceof Error ? result.reason.message : 'Source unavailable' };
           return;
         }
-        next.sources[id] = Object.fromEntries(result.value.map((item) => [keyOf(item), item]));
+        current[id] = Object.fromEntries(result.value.map((item) => [keyOf(item), item]));
+        next.sources[id] = Object.fromEntries(Object.entries(current[id]).map(([key, item]) => [key, compactTimelineBaselineItem(item)]));
         this.sources[index] = { id, state: 'collecting', lastObservedAt: observedAt };
       });
       if (this.baseline.initialized) {
-        const events = reduceTimelineSnapshot(this.baseline, next.sources, observedAt);
+        const events = reduceTimelineSnapshot(this.baseline, current, observedAt);
         if (events.length) {
           const enriched = await Promise.all(events.map(async (event) => {
             if (event.resource?.kind !== 'Pod' || !LOG_REASONS.test(event.reason || '')) return { ...event, sourceId: 'kubernetes' };
@@ -395,11 +423,20 @@ class TargetCollector {
           await appendEvents(this.manager.store, this.key, enriched);
         }
       }
-      await this.manager.store.saveState(this.key, next);
+      // Advance before persisting. A baseline that cannot be saved must not make
+      // every later poll replay, re-append, and re-read logs for the same changes.
       this.baseline = next;
       this.lastObservedAt = observedAt;
-      this.state = failures ? 'partial' : 'collecting';
-      this.message = failures ? `${failures} Kubernetes sources were unavailable during the latest poll.` : '';
+      const messages = failures ? [`${failures} Kubernetes sources were unavailable during the latest poll.`] : [];
+      try {
+        await this.manager.store.saveState(this.key, next);
+      } catch (error) {
+        messages.push(`Timeline baseline was not persisted (${error instanceof Error ? error.message : 'storage failed'}); collection continues and a restart starts a new baseline.`);
+      }
+      const previousMessage = this.message;
+      this.state = messages.length ? 'partial' : 'collecting';
+      this.message = messages.join(' ');
+      if (this.message.includes('not persisted') && this.message !== previousMessage) this.manager.logger.warn(this.message);
     } catch (error) {
       const previousMessage = this.message;
       this.state = 'offline';
@@ -416,14 +453,23 @@ class TargetCollector {
   }
 }
 
-export function createTimelineManager({ runtimeConfig, logger = console } = {}) {
-  let storePromise;
+// timelineStore and loadSources are injectable for collector tests; production
+// uses the agent-local SQLite store and the selected kubeconfig context.
+/**
+ * @param {{ runtimeConfig?: any, logger?: Pick<Console, 'warn'>, timelineStore?: any, pollMs?: number,
+ *   loadSources?: (target: any) => Promise<{ definitions: any[], results: any[], resolved: any }> }} [options]
+ */
+export function createTimelineManager({
+  runtimeConfig, logger = console, timelineStore, pollMs = POLL_MS,
+  loadSources = (target) => loadTimelineSources(runtimeConfig, target)
+} = {}) {
+  let storePromise = timelineStore ? Promise.resolve(timelineStore) : undefined;
   const collectors = new Map();
   let closed = false;
   let activeLogReads = 0;
   const store = { get: () => { storePromise ||= createTimelineStore(); return storePromise; } };
   const manager = {
-    runtimeConfig, logger, store: null, closed: false,
+    runtimeConfig, logger, loadSources, pollMs, store: null, closed: false,
     acquireLogSlot() {
       if (activeLogReads >= 2) return null;
       activeLogReads += 1;

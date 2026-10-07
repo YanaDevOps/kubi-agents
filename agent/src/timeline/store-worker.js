@@ -5,6 +5,7 @@ import { parentPort } from 'node:worker_threads';
 import { openDatabase } from './sqlite.js';
 
 const DAY = 86400000;
+const MiB = 1024 * 1024;
 const MAX_TARGETS = 256;
 const databases = new Map();
 let options;
@@ -96,6 +97,25 @@ function bytes(key) {
   }
   return total;
 }
+function pages(key) {
+  const db = database(key);
+  const size = db.get('PRAGMA page_size').page_size;
+  return { total: db.get('PRAGMA page_count').page_count * size, free: db.get('PRAGMA freelist_count').freelist_count * size };
+}
+// Bytes held by live rows. Quota enforcement deletes against this value so one
+// VACUUM can follow many deletions instead of rewriting the file per event.
+function liveBytes(key) {
+  return bytes(key) - pages(key).free;
+}
+// Reclaim actual bytes, not just SQLite free pages, once enough space is free or
+// the file itself exceeds its quota. VACUUM rewrites the whole database.
+function compact(key) {
+  const { total, free } = pages(key);
+  if (free && (free >= Math.max(MiB, total / 4) || bytes(key) > options.maxTargetBytes)) database(key).exec('VACUUM');
+}
+function cutoff(db) {
+  return Date.now() - db.get('SELECT retention FROM meta WHERE id=1').retention * DAY;
+}
 function bounds(key) {
   const db = database(key);
   const row = db.get(`SELECT COUNT(*) AS count, MIN(occurred) AS first, MAX(occurred) AS last,
@@ -112,12 +132,11 @@ function removeEvents(db, sql, ...args) {
 }
 function expire(key) {
   const db = database(key);
-  const cutoff = Date.now() - db.get('SELECT retention FROM meta WHERE id=1').retention * DAY;
-  const changed = transaction(db, () => {
-    const count = removeEvents(db, 'DELETE FROM events WHERE occurred < ?', cutoff);
-    return Number(db.run('DELETE FROM state WHERE updated < ?', cutoff).changes) + count;
+  const before = cutoff(db);
+  transaction(db, () => {
+    removeEvents(db, 'DELETE FROM events WHERE occurred < ?', before);
+    db.run('DELETE FROM state WHERE updated < ?', before);
   });
-  if (changed) db.exec('VACUUM');
 }
 function oldest(key) {
   const db = database(key);
@@ -133,24 +152,23 @@ function evict(candidate) {
     if (candidate.state) db.exec('DELETE FROM state');
     else removeEvents(db, 'DELETE FROM events WHERE id=?', candidate.id);
   });
-  // Reclaim actual bytes, not just SQLite free pages. Done only on eviction/expiry.
-  db.exec('VACUUM');
 }
 function enforce() {
   const keys = names().map((name) => name.slice(0, -7));
   for (const key of keys) {
     expire(key);
-    while (bytes(key) > options.maxTargetBytes) {
+    while (liveBytes(key) > options.maxTargetBytes) {
       const candidate = oldest(key);
       if (!candidate) fail('Target quota is smaller than SQLite overhead/sidecars', 'TIMELINE_QUOTA');
       evict(candidate);
     }
   }
-  while (keys.reduce((total, key) => total + bytes(key), 0) > options.maxTotalBytes) {
+  while (keys.reduce((total, key) => total + liveBytes(key), 0) > options.maxTotalBytes) {
     const candidate = keys.map(oldest).filter(Boolean).sort((a, b) => a.time - b.time)[0];
     if (!candidate) fail('Global quota is smaller than SQLite overhead/sidecars', 'TIMELINE_QUOTA');
     evict(candidate);
   }
+  for (const key of keys) compact(key);
 }
 function normalize(event) {
   if (!event || typeof event !== 'object' || Array.isArray(event)) fail('Expected a timeline event');
@@ -183,6 +201,9 @@ function append(key, event) {
   if (!entries.length || entries.length > 100) fail('Append accepts 1..100 events');
   const normalized = entries.map(normalize);
   const db = database(key);
+  // An observation already outside retention would be deleted by the next
+  // enforcement pass; storing it only churns the file. Its id is null.
+  const retainedFrom = cutoff(db);
   const ids = transaction(db, () => normalized.map(({ row, dedup, requestedId, cumulative }) => {
     const existing = db.get('SELECT body FROM events WHERE dedup=?', dedup);
     const previous = existing ? JSON.parse(existing.body) : null;
@@ -198,6 +219,7 @@ function append(key, event) {
       row.occurredAt = row.lastOccurredAt;
       row.observedAt = row.lastObservedAt;
     } else row.id = requestedId || randomUUID();
+    if (Date.parse(row.occurredAt) < retainedFrom) return null;
     db.run('UPDATE meta SET seq=seq+1 WHERE id=1');
     row.seq = db.get('SELECT seq FROM meta WHERE id=1').seq;
     row.sequence = row.seq;
