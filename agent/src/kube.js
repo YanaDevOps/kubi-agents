@@ -5247,7 +5247,7 @@ function normalizeDeliveryEvents(items, fetchedAt) {
   return buildResourceList(events, fetchedAt);
 }
 
-function parseMetricCpuMilli(value) {
+export function parseMetricCpuMilli(value) {
   const raw = stringOrUndefined(value);
   if (!raw) return 0;
   if (raw.endsWith('n')) return Number.parseFloat(raw.slice(0, -1)) / 1_000_000;
@@ -5257,7 +5257,7 @@ function parseMetricCpuMilli(value) {
   return Number.isFinite(parsed) ? parsed * 1000 : 0;
 }
 
-function parseMemoryBytes(value) {
+export function parseMemoryBytes(value) {
   const raw = stringOrUndefined(value);
   if (!raw) return 0;
   const match = raw.match(/^([0-9.]+)([KMGTP]i?|[kMGTPE])?$/);

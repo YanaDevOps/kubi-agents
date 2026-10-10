@@ -217,6 +217,12 @@ Secret data-key sizes and public TLS certificate expiry (never values), DNS
 resolution for Domain Health, new hygiene and RBAC validation rules, and
 Timeline activity statistics. Upgrade in place; no re-pairing is needed.
 
+Agent `v0.1.60` keeps the last five minutes of CPU and memory totals in memory
+(`/v1/metrics/history`: node metrics for the cluster, pod metrics per namespace)
+so the Cluster workload charts are full when the page opens. It reads
+metrics.k8s.io every 10 seconds only while the history was requested in the last
+30 minutes and stores nothing on disk. Upgrade in place; no re-pairing is needed.
+
 ConfigMap inventory groups env, volume, argument, and controller reference paths
 by unique Pod, workload template, or recognized controller. The API reports the
 consumer count separately from the underlying reference-path count so repeated

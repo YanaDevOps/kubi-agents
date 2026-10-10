@@ -56,6 +56,7 @@ import {
 import { MCP_RESOURCE_CATALOG, mcpToolDefinitions, summarizePolicyPostureForMCP } from '../../src/shared/mcp-catalog.js';
 import { loadLocalStorageDriverOverview } from './storage-drivers.js';
 import { loadLocalCiPipelines } from './ci/index.js';
+import { createUsageHistory } from './usage-history.js';
 
 function json(response, status, payload, headers = {}) {
   response.writeHead(status, {
@@ -226,6 +227,7 @@ export function createAgentLoopbackServer(options) {
   const jobsProvider = options.jobsProvider || loadLocalJobs;
   const jobLogsProvider = options.jobLogsProvider || loadLocalJobLogs;
   const metricsProvider = options.metricsProvider || loadLocalMetrics;
+  const usageHistory = options.usageHistory || createUsageHistory();
   const timelineProvider = options.timelineProvider;
   const backupActivityProvider = options.backupActivityProvider || loadLocalBackupActivity;
   const alertingSummaryProvider = options.alertingSummaryProvider || loadAlertingSummary;
@@ -765,6 +767,14 @@ export function createAgentLoopbackServer(options) {
         };
       }
 
+      if (url.pathname === '/v1/metrics/history') {
+        return {
+          status: 200,
+          payload: await usageHistory.read(runtimeConfig, url.searchParams.get('ns')),
+          headers: responseCorsHeaders
+        };
+      }
+
       if (url.pathname === '/v1/metrics') {
         return {
           status: 200,
@@ -1106,6 +1116,7 @@ export function createAgentLoopbackServer(options) {
       });
     },
     close() {
+      usageHistory.close();
       return new Promise((resolve, reject) => {
         server.close((error) => {
           if (error) {
