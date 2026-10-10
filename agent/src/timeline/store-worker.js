@@ -278,6 +278,44 @@ function list(key, query) {
     after: ascending && hasMore ? last : retained.after };
 }
 
+// Aggregates for the Timeline activity chart: per-bucket counts by severity plus
+// severity and category totals for the same filters. Only counts leave the store.
+function stats(key, query) {
+  enforce();
+  const where = [];
+  const args = [];
+  if (query.namespace) {
+    where.push(query.includeCluster ? '(namespace=? OR namespace=\'\')' : 'namespace=?');
+    args.push(text(query.namespace));
+  } else if (query.includeCluster === false) where.push("namespace<>''");
+  if (query.search) { where.push('instr(search,?)>0'); args.push(text(query.search, 256).toLowerCase()); }
+  const now = Date.now();
+  const to = query.to != null ? timestamp(query.to) : now;
+  const from = query.from != null ? timestamp(query.from) : to - 24 * 3600_000;
+  if (!(to > from)) fail('Invalid timeline stats range');
+  where.push('occurred >= ?', 'occurred <= ?'); args.push(from, to);
+  const buckets = Math.min(96, Math.max(1, Math.trunc(Number(query.buckets) || 48)));
+  const width = Math.max(1, Math.ceil((to - from) / buckets));
+  const base = `FROM events WHERE ${where.join(' AND ')}`;
+  const db = database(key);
+  const filtered = [...where];
+  const filteredArgs = [...args];
+  for (const field of ['severity', 'category']) {
+    if (query[field] == null || query[field] === '') continue;
+    const values = Array.isArray(query[field]) ? query[field] : [query[field]];
+    if (!values.length || values.length > 20) fail(`Invalid ${field} filter`);
+    filtered.push(`${field} IN (${values.map(() => '?').join(',')})`); filteredArgs.push(...values.map((value) => text(value)));
+  }
+  const series = Array.from({ length: buckets }, (_, index) => ({ start: new Date(from + index * width).toISOString(), critical: 0, warning: 0, change: 0, recovery: 0 }));
+  for (const row of db.all(`SELECT CAST((occurred - ?) / ? AS INTEGER) AS bucket, severity, COUNT(*) AS count FROM events WHERE ${filtered.join(' AND ')} GROUP BY bucket, severity`, from, width, ...filteredArgs)) {
+    const slot = series[Math.min(buckets - 1, Math.max(0, row.bucket))];
+    if (slot && row.severity in slot) slot[row.severity] += row.count;
+  }
+  const severities = Object.fromEntries(db.all(`SELECT severity, COUNT(*) AS count ${base} GROUP BY severity`, ...args).map((row) => [row.severity, row.count]));
+  const categories = Object.fromEntries(db.all(`SELECT category, COUNT(*) AS count ${base} GROUP BY category`, ...args).map((row) => [row.category, row.count]));
+  return { from: new Date(from).toISOString(), to: new Date(to).toISOString(), bucketMs: width, buckets: series, severities, categories, ...bounds(key) };
+}
+
 // Only compact reconnect identifiers/counters are retained, never specs, logs or credentials.
 const stateFields = new Set(['uid', 'id', 'kind', 'name', 'namespace', 'apiVersion', 'resourceVersion',
   'metadata', 'spec', 'status', 'generation', 'creationTimestamp', 'fingerprint', 'hash', 'count', 'restartCount', 'replicas', 'readyReplicas',
@@ -333,6 +371,7 @@ function dispatch(operation, key, value) {
   if (!/^[a-f0-9]{64}$/.test(key)) fail('Invalid target key');
   if (operation === 'append') return append(key, value);
   if (operation === 'list') return list(key, value || {});
+  if (operation === 'stats') return stats(key, value || {});
   if (operation === 'prune' && value?.retentionDays != null) {
     if (!Number.isInteger(value.retentionDays) || value.retentionDays < 1 || value.retentionDays > 30) fail('retentionDays must be 1..30');
     database(key).run('UPDATE meta SET retention=? WHERE id=1', value.retentionDays);

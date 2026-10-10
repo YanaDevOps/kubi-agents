@@ -30,6 +30,10 @@ function numberOrUndefined(value) {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 
+function asArray(value) {
+  return Array.isArray(value) ? value : [];
+}
+
 function numberOrZero(value) {
   return typeof value === 'number' && Number.isFinite(value) ? value : 0;
 }
@@ -211,6 +215,7 @@ function normalizeRole(record, kind) {
     subjectCount: 0,
     wildcard: rules.some(isWildcardRule),
     dangerous: rules.some(isDangerousRule),
+    aggregated: Boolean(record.aggregationRule),
     system: meta.name.startsWith('system:') || isSystemNamespace(meta.namespace),
     managed: isManagedResource(meta)
   };
@@ -743,7 +748,10 @@ function resolvedEndpointPort(endpoints, servicePort) {
 function ingressRoutes(ingresses, serviceMap, endpointMap) {
   const rows = [];
 
-  function pushRoute(meta, host, path, backend) {
+  function pushRoute(meta, host, path, backend, ingress) {
+    const ingressSpec = asRecord(ingress?.spec);
+    const annotations = asStringRecord(asRecord(ingress?.metadata)?.annotations);
+    const tlsEntry = asRecordArray(ingressSpec?.tls).find((entry) => (Array.isArray(entry.hosts) ? entry.hosts : []).includes(host));
     const serviceName = stringOrUndefined(backend?.name) || 'unknown';
     const servicePort = backend?.port && typeof backend.port === 'object'
       ? String(backend.port.number ?? backend.port.name ?? '')
@@ -779,7 +787,10 @@ function ingressRoutes(ingresses, serviceMap, endpointMap) {
       servicePort,
       serviceExists: Boolean(service),
       servicePortResolved: resolved,
-      endpointStatus
+      endpointStatus,
+      ingressClass: stringOrUndefined(ingressSpec?.ingressClassName) || annotations['kubernetes.io/ingress.class'] || undefined,
+      tls: Boolean(tlsEntry),
+      tlsManagedBy: tlsEntry && Object.keys(annotations).some((key) => key.startsWith('cert-manager.io/')) ? 'cert-manager' : undefined
     });
   }
 
@@ -790,7 +801,7 @@ function ingressRoutes(ingresses, serviceMap, endpointMap) {
 
     const defaultBackend = asRecord(spec?.defaultBackend)?.service;
     if (defaultBackend) {
-      pushRoute(meta, '*', '/', defaultBackend);
+      pushRoute(meta, '*', '/', defaultBackend, ingress);
     }
 
     for (const rule of rules) {
@@ -799,7 +810,7 @@ function ingressRoutes(ingresses, serviceMap, endpointMap) {
       for (const path of asRecordArray(http?.paths)) {
         const backend = asRecord(path.backend)?.service;
         if (!backend) continue;
-        pushRoute(meta, host, stringOrUndefined(path.path) || '/', backend);
+        pushRoute(meta, host, stringOrUndefined(path.path) || '/', backend, ingress);
       }
     }
   }
@@ -1311,6 +1322,218 @@ export function buildRbacValidationItems(rbac) {
     }
   }
 
+  const clusterRoles = rbac.clusterRoles?.items || [];
+  for (const binding of rbac.clusterRoleBindings?.items || []) {
+    const role = clusterRoles.find((entry) => entry.name === binding.roleRef);
+    const readsSecrets = role?.rules?.some((rule) =>
+      (rule.apiGroups.length === 0 || rule.apiGroups.includes('') || rule.apiGroups.includes('*')) &&
+      (rule.resources.includes('secrets') || rule.resources.includes('*')) &&
+      rule.resourceNames.length === 0 &&
+      rule.verbs.some((verb) => verb === 'get' || verb === 'list' || verb === 'watch' || verb === '*'));
+    if (!readsSecrets || binding.roleRef === 'cluster-admin') continue;
+    for (const subject of binding.subjects.filter((entry) => entry.kind === 'ServiceAccount' && !entry.system)) {
+      items.push(
+        validationItem(
+          `rbac.sa_reads_secrets.${binding.id}.${subject.id}`,
+          'rbac',
+          'warning',
+          'ServiceAccount can read Secrets cluster-wide',
+          `ClusterRoleBinding ${binding.name} lets ServiceAccount ${subject.displayName} read Secrets in every namespace through ClusterRole ${binding.roleRef}.`,
+          'Bind a namespaced Role instead, or restrict the rule with resourceNames.',
+          [{ kind: 'ClusterRoleBinding', name: binding.name }, { kind: 'ServiceAccount', namespace: subject.namespace, name: subject.name }],
+          [`grants ${binding.roleRef} → ServiceAccount ${subject.displayName}`]
+        )
+      );
+    }
+  }
+
+  for (const role of clusterRoles) {
+    if (role.bindingCount > 0 || role.system || role.managed || role.aggregated) continue;
+    items.push(
+      validationItem(
+        `rbac.unbound_cluster_role.${role.id}`,
+        'rbac',
+        'info',
+        'ClusterRole not bound to any subject',
+        `ClusterRole ${role.name} has ${role.ruleCount} rule(s) and no binding references it.`,
+        'Delete it if nothing aggregates or binds it, or document why it is kept.',
+        [{ kind: 'ClusterRole', name: role.name }],
+        [`${role.ruleCount} rule(s)`]
+      )
+    );
+  }
+
+  return uniqueBy(items, (item) => item.id);
+}
+
+const RESTART_THRESHOLD = 10;
+const CERT_WARNING_DAYS = 21;
+
+function podOwnerRef(pod) {
+  const meta = metadataFor(pod);
+  const owner = asRecordArray(asRecord(pod.metadata)?.ownerReferences).find((entry) => entry.controller === true) || asRecordArray(asRecord(pod.metadata)?.ownerReferences)[0];
+  const kind = stringOrUndefined(owner?.kind) || 'Pod';
+  const name = stringOrUndefined(owner?.name) || meta.name;
+  return kind === 'ReplicaSet' ? { kind: 'Deployment', name: name.replace(/-[a-z0-9]{5,10}$/, '') } : { kind, name };
+}
+
+function podSecretReferences(pod) {
+  const spec = asRecord(pod.spec) || {};
+  const refs = [];
+  for (const container of [...asRecordArray(spec.containers), ...asRecordArray(spec.initContainers)]) {
+    for (const env of asRecordArray(container.env)) {
+      const ref = asRecord(asRecord(env.valueFrom)?.secretKeyRef);
+      if (ref?.name) refs.push({ name: String(ref.name), optional: ref.optional === true, via: `env ${String(env.name || '')}` });
+    }
+    for (const source of asRecordArray(container.envFrom)) {
+      const ref = asRecord(source.secretRef);
+      if (ref?.name) refs.push({ name: String(ref.name), optional: ref.optional === true, via: 'envFrom' });
+    }
+  }
+  for (const volume of asRecordArray(spec.volumes)) {
+    const secret = asRecord(volume.secret);
+    if (secret?.secretName) refs.push({ name: String(secret.secretName), optional: secret.optional === true, via: `volume ${String(volume.name || '')}` });
+    for (const source of asRecordArray(asRecord(volume.projected)?.sources)) {
+      const projected = asRecord(source.secret);
+      if (projected?.name) refs.push({ name: String(projected.name), optional: projected.optional === true, via: `volume ${String(volume.name || '')}` });
+    }
+  }
+  for (const pull of asRecordArray(spec.imagePullSecrets)) {
+    if (pull.name) refs.push({ name: String(pull.name), optional: true, via: 'imagePullSecrets' });
+  }
+  return refs;
+}
+
+/**
+ * Pod, secret, node and certificate hygiene checks shared by the agent and browser-direct validation.
+ * @param {{ pods?: any[]; secrets?: any[] | null; nodes?: any[]; certificates?: any[]; now?: number }} [input]
+ */
+export function buildHygieneValidationItems({ pods = [], secrets = null, nodes = [], certificates = [], now = Date.now() } = {}) {
+  const items = [];
+  const workloads = new Map();
+  for (const pod of asRecordArray(pods)) {
+    const meta = metadataFor(pod);
+    const status = asRecord(pod.status) || {};
+    if (['Succeeded', 'Failed'].includes(stringOrUndefined(status.phase) || '')) continue;
+    const owner = podOwnerRef(pod);
+    const key = `${meta.namespace}/${owner.kind}/${owner.name}`;
+    const entry = workloads.get(key) || { namespace: meta.namespace, owner, pods: [], noRequests: new Set(), noReadiness: new Set() };
+    entry.pods.push(pod);
+    for (const container of asRecordArray(asRecord(pod.spec)?.containers)) {
+      const requests = asRecord(asRecord(container.resources)?.requests) || {};
+      if (requests.cpu === undefined || requests.memory === undefined) entry.noRequests.add(String(container.name));
+      if (!container.readinessProbe && asRecordArray(container.ports).length > 0) entry.noReadiness.add(String(container.name));
+    }
+    workloads.set(key, entry);
+
+    const restarts = asRecordArray(status.containerStatuses).reduce((sum, container) => sum + numberOrZero(container.restartCount), 0);
+    const lastRestart = Math.max(0, ...asRecordArray(status.containerStatuses).map((container) => Date.parse(String(asRecord(asRecord(container.lastState)?.terminated)?.finishedAt || '')) || 0));
+    if (restarts >= RESTART_THRESHOLD && now - lastRestart < 86_400_000) {
+      const reason = asRecordArray(status.containerStatuses).map((container) => stringOrUndefined(asRecord(asRecord(container.lastState)?.terminated)?.reason)).find(Boolean);
+      items.push(
+        validationItem(
+          `pods.high_restarts.${meta.namespace}.${meta.name}`,
+          'pods',
+          'warning',
+          'High restart count',
+          `${meta.namespace}/${meta.name} restarted ${restarts} times${reason ? `, last termination ${reason}` : ''}.`,
+          'Check the previous container logs and events: OOMKilled points to memory limits, probe failures to health checks.',
+          [{ kind: 'Pod', namespace: meta.namespace, name: meta.name }],
+          [`${restarts} restarts`, ...(reason ? [`last reason ${reason}`] : [])]
+        )
+      );
+    }
+
+    if (secrets) {
+      const names = new Set(asRecordArray(secrets).filter((secret) => metadataFor(secret).namespace === meta.namespace).map((secret) => metadataFor(secret).name));
+      for (const ref of podSecretReferences(pod)) {
+        if (names.has(ref.name) || ref.via === 'imagePullSecrets') continue;
+        items.push(
+          validationItem(
+            `secrets.missing_reference.${meta.namespace}.${owner.name}.${ref.name}`,
+            'secrets',
+            ref.optional ? 'warning' : 'critical',
+            'Referenced Secret is missing',
+            `${owner.kind} ${meta.namespace}/${owner.name} references Secret ${ref.name} (${ref.via}), which does not exist.`,
+            ref.optional
+              ? 'The pod starts because the reference is optional, but the feature it enables is off. Create the Secret or remove the reference.'
+              : 'Pods cannot start until the Secret exists. Create it or fix the reference.',
+            [{ kind: owner.kind, namespace: meta.namespace, name: owner.name }, { kind: 'Secret', namespace: meta.namespace, name: ref.name }],
+            [`${ref.via} → ${ref.name}${ref.optional ? ' (optional)' : ''}`]
+          )
+        );
+      }
+    }
+  }
+
+  for (const entry of workloads.values()) {
+    if (isSystemNamespace(entry.namespace)) continue;
+    const ref = { kind: entry.owner.kind, namespace: entry.namespace, name: entry.owner.name };
+    if (entry.noRequests.size) {
+      items.push(
+        validationItem(
+          `pods.no_requests.${entry.namespace}.${entry.owner.kind}.${entry.owner.name}`,
+          'pods',
+          'warning',
+          'Container without resource requests',
+          `${entry.owner.kind} ${entry.namespace}/${entry.owner.name} runs ${[...entry.noRequests].join(', ')} without cpu or memory requests.`,
+          'Set requests close to observed usage so the scheduler can place pods honestly.',
+          [ref],
+          [...entry.noRequests].map((container) => `container ${container}`)
+        )
+      );
+    }
+    if (entry.noReadiness.size) {
+      items.push(
+        validationItem(
+          `pods.no_readiness.${entry.namespace}.${entry.owner.kind}.${entry.owner.name}`,
+          'pods',
+          'info',
+          'No readiness probe',
+          `${entry.owner.kind} ${entry.namespace}/${entry.owner.name} serves ports from ${[...entry.noReadiness].join(', ')} without a readiness probe.`,
+          'Add a readiness probe so traffic waits until the container can answer.',
+          [ref],
+          [...entry.noReadiness].map((container) => `container ${container}`)
+        )
+      );
+    }
+  }
+
+  const controlPlanes = asRecordArray(nodes).filter((node) => asArray(node.roles).some((role) => role === 'control-plane' || role === 'master'));
+  if (controlPlanes.length === 1) {
+    items.push(
+      validationItem('cluster.single_control_plane', 'cluster', 'info', 'Single control-plane node', `${controlPlanes[0].name} is the only control-plane node.`,
+        'Fine for small clusters; run three control-plane nodes when the API must survive a node loss.', [{ kind: 'Node', name: controlPlanes[0].name }], ['1 control-plane node'])
+    );
+  }
+  for (const node of controlPlanes) {
+    const taints = asArray(node.taints).map(String);
+    if (taints.some((taint) => /node-role\.kubernetes\.io\/(control-plane|master).*:NoSchedule/.test(taint))) continue;
+    items.push(
+      validationItem(`cluster.control_plane_schedulable.${node.name}`, 'cluster', 'info', 'Control-plane node schedulable for workloads', `${node.name} has no control-plane NoSchedule taint.`,
+        'Expected on single-node clusters; on larger clusters taint control-plane nodes to keep workloads away from etcd and the API server.', [{ kind: 'Node', name: node.name }], taints.length ? taints : ['no taints'])
+    );
+  }
+
+  for (const certificate of asRecordArray(certificates)) {
+    const expires = Date.parse(String(certificate.notAfter || certificate.expiry || ''));
+    if (!Number.isFinite(expires)) continue;
+    const days = Math.floor((expires - now) / 86_400_000);
+    if (days > CERT_WARNING_DAYS) continue;
+    items.push(
+      validationItem(
+        `secrets.certificate_expiry.${certificate.namespace}.${certificate.name}`,
+        'secrets',
+        days < 0 ? 'critical' : days <= 7 ? 'warning' : 'info',
+        days < 0 ? 'TLS certificate expired' : 'TLS certificate expires soon',
+        `Certificate ${certificate.namespace}/${certificate.name} ${days < 0 ? 'expired' : 'expires'} ${new Date(expires).toISOString().slice(0, 10)} (${days < 0 ? `${-days} days ago` : `in ${days} days`}).`,
+        'cert-manager should renew automatically; check the Certificate, Order and Challenge status if it does not.',
+        [{ kind: 'Certificate', namespace: certificate.namespace, name: certificate.name }],
+        asArray(certificate.dnsNames).map(String)
+      )
+    );
+  }
+
   return uniqueBy(items, (item) => item.id);
 }
 
@@ -1381,7 +1604,9 @@ export function buildPortsValidationItems(ports) {
         'networking',
         'warning',
         unavailable ? 'Service has no ready endpoints' : 'Service endpoints are partially ready',
-        `${first.namespace}/${first.service} has ${readyEndpoints}/${totalEndpoints} ready endpoints.`,
+        unavailable
+          ? `${first.namespace}/${first.service} has ${readyEndpoints}/${totalEndpoints} ready endpoints.`
+          : `${first.namespace}/${first.service} has ${readyEndpoints}/${totalEndpoints} ready endpoints.`,
         unavailable
           ? 'Check pod readiness, EndpointSlices, and workload rollout state.'
           : 'Inspect the Not Ready pods and their readiness probes before capacity degrades further.',

@@ -209,6 +209,14 @@ as compact count/time observations, skips observations already outside
 retention, and enforces SQLite quotas without a full `VACUUM` after every
 expiry. Upgrade in place; the first poll after upgrade starts a fresh baseline.
 
+Agent `v0.1.59` serves the data behind the redesigned KUBI app: object inspect
+(`/v1/objects/inspect`: Events and a manifest with env values removed, Secrets
+excluded), namespace summaries and component details from metadata-only reads,
+a Service Mesh overview, PVC consumers and PV backends, Job/CronJob run details,
+Secret data-key sizes and public TLS certificate expiry (never values), DNS
+resolution for Domain Health, new hygiene and RBAC validation rules, and
+Timeline activity statistics. Upgrade in place; no re-pairing is needed.
+
 ConfigMap inventory groups env, volume, argument, and controller reference paths
 by unique Pod, workload template, or recognized controller. The API reports the
 consumer count separately from the underlying reference-path count so repeated

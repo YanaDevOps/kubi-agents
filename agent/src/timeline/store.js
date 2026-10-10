@@ -29,6 +29,8 @@ export async function createTimelineStore({
   }
   // A parent launched with --input-type=module (common in smoke tests) cannot
   // be used as a worker entrypoint. The worker is an actual module file.
+  // Bun preserves entrypoint paths relative to the common build root. The main
+  // entrypoint is agent/src/cli.js, so the embedded worker is timeline/store-worker.js.
   const compiledBun = Boolean(process.versions.bun && !/(^|[\\/])bun(?:\.exe)?$/i.test(process.execPath));
   const workerUrl = compiledBun
     ? new URL('./timeline/store-worker.js', import.meta.url)
@@ -106,6 +108,7 @@ export async function createTimelineStore({
   return {
     append: (targetKey, event) => request('append', targetKey, event),
     list: (targetKey, query = {}) => request('list', targetKey, query),
+    stats: (targetKey, query = {}) => request('stats', targetKey, query),
     detail: (targetKey, id) => request('detail', targetKey, id),
     getState: (targetKey) => request('getState', targetKey),
     saveState: (targetKey, state) => request('saveState', targetKey, state),

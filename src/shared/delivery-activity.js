@@ -210,6 +210,19 @@ function sourceReferences(value) {
   });
 }
 
+/** Outcome of the most recent sync operation, without the resource result list. */
+function lastOperation(statusRecord) {
+  const operation = record(statusRecord.operationState);
+  const phase = text(operation.phase);
+  if (!phase) return undefined;
+  return {
+    phase,
+    message: text(operation.message),
+    startedAt: text(operation.startedAt),
+    finishedAt: text(operation.finishedAt)
+  };
+}
+
 function syncPolicyDetails(spec) {
   const policy = record(spec.syncPolicy);
   const automatedValue = policy.automated;
@@ -367,6 +380,7 @@ function parseDeployment(definition, value) {
       pattern: childApplication ? 'app-of-apps' : 'standard',
       syncPolicy: policy.mode,
       syncPolicyDetails: policy,
+      lastOperation: lastOperation(statusRecord),
       orphanedResources: orphanedResourceSummary(sourceConditions)
     };
   }

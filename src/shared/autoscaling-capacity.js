@@ -241,7 +241,7 @@ function normalizeKeda(item, kind) {
     state: ready?.status === 'False' ? 'Unavailable' : fallback?.status === 'True' ? 'Fallback' : paused ? 'Paused' : 'Ready',
     provider: 'KEDA', minReplicas: itemSpec.minReplicaCount === undefined ? 0 : number(itemSpec.minReplicaCount),
     maxReplicas: number(itemSpec.maxReplicaCount === undefined ? 100 : itemSpec.maxReplicaCount), conditions,
-    details: { pollingInterval: itemSpec.pollingInterval, cooldownPeriod: itemSpec.cooldownPeriod, idleReplicaCount: itemSpec.idleReplicaCount,
+    details: { lastActiveTime: text(status(item).lastActiveTime) || undefined, pollingInterval: itemSpec.pollingInterval, cooldownPeriod: itemSpec.cooldownPeriod, idleReplicaCount: itemSpec.idleReplicaCount,
       scaleToZero: kind === 'ScaledObject' && number(itemSpec.minReplicaCount) === 0, paused, fallback: itemSpec.fallback ? {
         failureThreshold: record(itemSpec.fallback).failureThreshold, replicas: record(itemSpec.fallback).replicas,
         behavior: record(itemSpec.fallback).behavior
@@ -263,6 +263,23 @@ function normalizePdb(item) {
   };
 }
 
+function selectorMatches(selector, labels) {
+  const source = record(selector);
+  const matchLabels = record(source.matchLabels);
+  const expressions = list(source.matchExpressions);
+  if (!Object.keys(matchLabels).length && !expressions.length) return false;
+  if (Object.entries(matchLabels).some(([key, value]) => labels[key] !== value)) return false;
+  return expressions.every((entry) => {
+    const { key, operator } = record(entry);
+    const values = list(record(entry).values).map(text);
+    if (operator === 'In') return values.includes(labels[key]);
+    if (operator === 'NotIn') return !values.includes(labels[key]);
+    if (operator === 'Exists') return key in labels;
+    if (operator === 'DoesNotExist') return !(key in labels);
+    return false;
+  });
+}
+
 function podOwner(pod, replicaSets) {
   const owner = list(metadata(pod).ownerReferences).find((entry) => record(entry).controller === true) || list(metadata(pod).ownerReferences)[0];
   if (!owner) return { kind: 'Pod', name: text(metadata(pod).name) };
@@ -282,6 +299,7 @@ function podUsage(metric) {
 
 function capacityFromInventory(pods, replicaSets, podMetrics, nodes, nodeMetrics, namespace) {
   const metricByPod = new Map(podMetrics.map((item) => [`${text(metadata(item).namespace)}/${text(metadata(item).name)}`, item]));
+  const metricByNode = new Map(nodeMetrics.map((item) => [text(metadata(item).name), item]));
   const workloadRows = new Map();
   let clusterRequests = emptyResources();
   let scopedRequests = emptyResources();
@@ -299,8 +317,17 @@ function capacityFromInventory(pods, replicaSets, podMetrics, nodes, nodeMetrics
       const owner = podOwner(pod, replicaSets);
       const key = `${ns}/${owner.kind}/${owner.name}`;
       const row = workloadRows.get(key) || { id: key, namespace: ns, kind: owner.kind, name: owner.name, pods: 0, readyPods: 0,
-        requests: emptyResources(), limits: emptyResources(), usage: emptyResources() };
+        requests: emptyResources(), limits: emptyResources(), usage: emptyResources(), missingRequests: [], missingLimits: [], labelSets: [] };
       row.pods += 1;
+      for (const container of list(spec(pod).containers)) {
+        const resources = record(record(container).resources);
+        for (const [field, target] of [['requests', row.missingRequests], ['limits', row.missingLimits]]) {
+          for (const key of ['cpu', 'memory']) if (record(resources[field])[key] === undefined && !target.includes(key)) target.push(key);
+        }
+      }
+      if (row.labelSets.length < 4) row.labelSets.push(record(metadata(pod).labels));
+      if (!row.containerRequests) row.containerRequests = Object.fromEntries(list(spec(pod).containers).map((container) => [text(record(container).name),
+        { cpu: text(record(record(record(container).resources).requests).cpu) || undefined, memory: text(record(record(record(container).resources).requests).memory) || undefined }]));
       row.readyPods += Number(list(status(pod).conditions).some((entry) => text(record(entry).type) === 'Ready' && text(record(entry).status) === 'True'));
       row.requests = sumResources(row.requests, requests); row.limits = sumResources(row.limits, limits); row.usage = sumResources(row.usage, usage);
       workloadRows.set(key, row);
@@ -308,11 +335,47 @@ function capacityFromInventory(pods, replicaSets, podMetrics, nodes, nodeMetrics
   }
   let allocatable = emptyResources();
   let schedulableNodes = 0;
+  const nodeRows = [];
   for (const node of nodes) {
-    const ready = list(status(node).conditions).some((entry) => text(record(entry).type) === 'Ready' && text(record(entry).status) === 'True');
-    if (!ready || spec(node).unschedulable === true) continue;
-    schedulableNodes += 1;
-    allocatable = sumResources(allocatable, addResourceList(emptyResources(), status(node).allocatable));
+    const name = text(metadata(node).name);
+    const conditions = list(status(node).conditions);
+    const ready = conditions.some((entry) => text(record(entry).type) === 'Ready' && text(record(entry).status) === 'True');
+    const schedulable = ready && spec(node).unschedulable !== true;
+    const nodeAllocatable = addResourceList(emptyResources(), status(node).allocatable);
+    if (schedulable) {
+      schedulableNodes += 1;
+      allocatable = sumResources(allocatable, nodeAllocatable);
+    }
+    const assignedPods = active.filter((pod) => text(spec(pod).nodeName) === name);
+    let nodeRequests = emptyResources();
+    const podUsageRows = [];
+    for (const pod of assignedPods) {
+      nodeRequests = sumResources(nodeRequests, effectivePodResources(spec(pod), 'requests'));
+      const podNamespace = text(metadata(pod).namespace);
+      const podName = text(metadata(pod).name);
+      const usage = podUsage(metricByPod.get(`${podNamespace}/${podName}`));
+      podUsageRows.push({ namespace: podNamespace, name: podName, usage });
+    }
+    const nodeMetric = metricByNode.get(name);
+    const nodeUsage = nodeMetric ? podUsage({ containers: [{ usage: record(nodeMetric).usage }] }) : null;
+    const topCpuPod = [...podUsageRows].sort((left, right) => right.usage.cpuMilli - left.usage.cpuMilli)[0];
+    const topMemoryPod = [...podUsageRows].sort((left, right) => right.usage.memoryBytes - left.usage.memoryBytes)[0];
+    nodeRows.push({
+      name,
+      ready,
+      schedulable,
+      allocatable: compactResources(nodeAllocatable),
+      requests: compactResources(nodeRequests),
+      pods: assignedPods.length,
+      podCapacity: number(record(status(node).allocatable).pods) || undefined,
+      roles: Object.keys(record(metadata(node).labels)).filter((key) => key.startsWith('node-role.kubernetes.io/')).map((key) => key.slice(24)).filter(Boolean),
+      ...(nodeUsage ? { usage: compactResources(nodeUsage) } : {}),
+      pressure: conditions
+        .filter((entry) => /Pressure$/.test(text(record(entry).type)) && text(record(entry).status) === 'True')
+        .map((entry) => text(record(entry).type)),
+      ...(topCpuPod?.usage.cpuMilli ? { topCpuPod: { namespace: topCpuPod.namespace, name: topCpuPod.name, usageMilli: topCpuPod.usage.cpuMilli } } : {}),
+      ...(topMemoryPod?.usage.memoryBytes ? { topMemoryPod: { namespace: topMemoryPod.namespace, name: topMemoryPod.name, usageBytes: topMemoryPod.usage.memoryBytes } } : {})
+    });
   }
   let clusterUsage = emptyResources();
   for (const metric of nodeMetrics) clusterUsage = sumResources(clusterUsage, podUsage({ containers: [{ usage: record(metric).usage }] }));
@@ -321,7 +384,9 @@ function capacityFromInventory(pods, replicaSets, podMetrics, nodes, nodeMetrics
       ...(nodeMetrics.length ? { usage: compactResources(clusterUsage) } : {}) },
     scoped: { namespace, requests: compactResources(scopedRequests), limits: compactResources(scopedLimits),
       ...(podMetrics.length ? { usage: compactResources(scopedUsage) } : {}) },
-    workloads: [...workloadRows.values()].map((row) => ({ ...row, requests: compactResources(row.requests), limits: compactResources(row.limits), usage: compactResources(row.usage) }))
+    workloads: [...workloadRows.values()].map((row) => ({ ...row, requests: compactResources(row.requests), limits: compactResources(row.limits), usage: compactResources(row.usage) })),
+    // labelSets stay internal: collect() replaces them with PDB and autoscaler coverage.
+    nodes: nodeRows
   };
 }
 
@@ -504,6 +569,17 @@ async function collect(request, namespace, cloudProvider) {
   sources.push(...list(cloud.sources));
   const capacity = capacityFromInventory(byId.pods, byId.replicasets, byId['pod-metrics'], byId.nodes, byId['node-metrics'], namespace || 'all');
   capacity.quotas = quotas; capacity.limitRanges = limitRanges;
+  const hpaTargets = new Map([...hpas, ...scaledObjects].map((item) => [`${item.namespace}/${item.target}`, item.kind === 'ScaledObject' ? `scaledobject ${item.name}` : `hpa ${item.name}`]));
+  const workloadRequests = new Map(capacity.workloads.map((row) => [`${row.namespace}/${row.kind}/${row.name}`, row.containerRequests || {}]));
+  for (const vpa of vpas) {
+    const requests = workloadRequests.get(`${vpa.namespace}/${vpa.target}`) || {};
+    vpa.details.recommendations = vpa.details.recommendations.map((entry) => ({ ...entry, currentRequest: requests[entry.container] || {} }));
+  }
+  capacity.workloads = capacity.workloads.map(({ labelSets, containerRequests, ...row }) => {
+    const matching = pdbs.filter((pdb) => pdb.namespace === row.namespace && labelSets.some((labels) => selectorMatches(pdb.details.selector, labels)));
+    return { ...row, autoscaler: hpaTargets.get(`${row.namespace}/${row.kind}/${row.name}`),
+      pdbs: matching.map((pdb) => ({ name: pdb.name, disruptionsAllowed: pdb.details.disruptionsAllowed })) };
+  });
   const unschedulablePods = byId.pods.filter(unschedulablePod).map((item) => ({ id: objectId('Pod', item), kind: 'Pod', name: text(metadata(item).name), namespace: text(metadata(item).namespace),
     state: 'Unschedulable', details: { message: text(record(unschedulablePod(item)).message).slice(0, 1_024) } }));
   const sourceComplete = Object.fromEntries(sources.map((entry) => [entry.id, entry.status === 'available' && !entry.partial]));
@@ -555,7 +631,16 @@ export async function collectAutoscalingCapacity({ request, namespace = null, vi
     hpas: include('hpa') ? clipped(data.hpas) : [], vpas: include('vpa') ? clipped(data.vpas) : [],
     scaledObjects: include('keda') ? clipped(data.scaledObjects) : [], scaledJobs: include('keda') ? clipped(data.scaledJobs) : [],
     pdbs: include('pdb') ? clipped(data.pdbs) : [],
-    capacity: include('capacity') || view === 'summary' ? data.capacity : { clusterWide: { nodes: 0, schedulableNodes: 0, allocatable: {}, requests: {} }, scoped: { namespace: scope || 'all', requests: {}, limits: {} }, workloads: [], quotas: [], limitRanges: [] },
+    capacity: include('capacity') || view === 'summary'
+      ? {
+          clusterWide: data.capacity.clusterWide,
+          scoped: data.capacity.scoped,
+          workloads: include('capacity') ? clipped(data.capacity.workloads) : [],
+          nodes: include('capacity') ? clipped(data.capacity.nodes) : [],
+          quotas: include('capacity') ? clipped(data.capacity.quotas) : [],
+          limitRanges: include('capacity') ? clipped(data.capacity.limitRanges) : []
+        }
+      : { clusterWide: { nodes: 0, schedulableNodes: 0, allocatable: {}, requests: {} }, scoped: { namespace: scope || 'all', requests: {}, limits: {} }, workloads: [], nodes: [], quotas: [], limitRanges: [] },
     nodeScaling: { providers: include('node-scaling') || view === 'summary' ? clipped(data.providers) : [], pools: include('node-scaling') ? clipped(data.pools) : [],
       claims: include('node-scaling') ? clipped(data.claims) : [], unschedulablePods: include('node-scaling') || view === 'summary' ? clipped(data.unschedulablePods) : [] }
   };

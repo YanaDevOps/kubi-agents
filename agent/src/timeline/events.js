@@ -330,7 +330,7 @@ const MEANINGFUL_NORMAL_REASONS = new Set([
   'RolloutCompleted', 'ProgressDeadlineExceeded', 'BackOff', 'Evicted', 'OOMKilled',
   'Completed', 'JobCompleted', 'SawCompletedJob', 'SuccessfulDelete', 'VolumeResizeSuccessful',
   'FileSystemResizeSuccessful', 'ProvisioningSucceeded', 'Bound', 'Synced', 'ReconciliationSucceeded',
-  'ReconciliationFailed', 'HealthStatusChanged', 'OperationCompleted', 'OperationFailed', 'BackupCompleted', 'BackupFailed', 'RestoreCompleted', 'RestoreFailed'
+  'ReconciliationFailed', 'HealthStatusChanged', 'Launched', 'DisruptionLaunching', 'DisruptionTerminating', 'SpotInterrupted', 'KEDAScaleTargetActivated', 'KEDAScaleTargetDeactivated', 'OperationCompleted', 'OperationFailed', 'BackupCompleted', 'BackupFailed', 'RestoreCompleted', 'RestoreFailed'
 ]);
 
 export function eventOccurrence(object) {

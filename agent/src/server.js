@@ -24,6 +24,10 @@ import {
   loadLocalPodDns,
   loadLocalPodLogs,
   loadLocalPodRelatedResources,
+  loadLocalPodInspect,
+  loadLocalObjectInspect,
+  loadLocalNamespaceSummary,
+  loadLocalComponentDetails,
   loadLocalPorts,
   loadLocalTraffic,
   loadLocalCni,
@@ -196,11 +200,15 @@ export function createAgentLoopbackServer(options) {
   const overviewProvider = options.overviewProvider || loadLocalClusterOverview;
   const capabilityProvider = options.capabilityProvider || loadLocalRuntimeCapability;
   const namespacesProvider = options.namespacesProvider || loadLocalNamespaces;
+  const namespaceSummaryProvider = options.namespaceSummaryProvider || loadLocalNamespaceSummary;
+  const componentDetailsProvider = options.componentDetailsProvider || loadLocalComponentDetails;
   const nodesProvider = options.nodesProvider || loadLocalNodes;
   const podsProvider = options.podsProvider || loadLocalPods;
   const podDnsProvider = options.podDnsProvider || loadLocalPodDns;
   const podLogsProvider = options.podLogsProvider || loadLocalPodLogs;
   const podRelatedResourcesProvider = options.podRelatedResourcesProvider || loadLocalPodRelatedResources;
+  const podInspectProvider = options.podInspectProvider || loadLocalPodInspect;
+  const objectInspectProvider = options.objectInspectProvider || loadLocalObjectInspect;
   const workloadsProvider = options.workloadsProvider || loadLocalWorkloads;
   const servicesProvider = options.servicesProvider || loadLocalServices;
   const secretsProvider = options.secretsProvider || loadLocalSecrets;
@@ -578,7 +586,7 @@ export function createAgentLoopbackServer(options) {
       };
     }
 
-    if (url.pathname === '/v1/timeline' || url.pathname === '/v1/timeline/status' || url.pathname.startsWith('/v1/timeline/events/')) {
+    if (url.pathname === '/v1/timeline' || url.pathname === '/v1/timeline/status' || url.pathname === '/v1/timeline/stats' || url.pathname.startsWith('/v1/timeline/events/')) {
       if (!timelineProvider) {
         return { status: 501, payload: { message: 'Cluster Timeline is not available in this agent build.' }, headers: responseCorsHeaders };
       }
@@ -597,9 +605,13 @@ export function createAgentLoopbackServer(options) {
           const event = await timelineProvider.detail(target, id);
           return event ? { status: 200, payload: event, headers: responseCorsHeaders } : { status: 404, payload: { message: 'Timeline event not found.' }, headers: responseCorsHeaders };
         }
-        const allowed = new Set(['from', 'to', 'namespace', 'includeCluster', 'severity', 'category', 'search', 'cursor', 'after', 'limit']);
+        const allowed = new Set(['from', 'to', 'namespace', 'includeCluster', 'severity', 'category', 'search', 'cursor', 'after', 'limit', 'buckets']);
         const query = {};
-        for (const [key, value] of url.searchParams.entries()) if (allowed.has(key)) query[key] = key === 'includeCluster' ? value === 'true' : key === 'limit' ? Number(value) : value;
+        for (const [key, value] of url.searchParams.entries()) if (allowed.has(key)) query[key] = key === 'includeCluster' ? value === 'true' : key === 'limit' || key === 'buckets' ? Number(value) : value;
+        if (url.pathname === '/v1/timeline/stats') {
+          if (typeof timelineProvider.stats !== 'function') return { status: 501, payload: { message: 'Timeline statistics are not available in this agent build.' }, headers: responseCorsHeaders };
+          return { status: 200, payload: await timelineProvider.stats(target, query), headers: responseCorsHeaders };
+        }
         return { status: 200, payload: await timelineProvider.list(target, query), headers: responseCorsHeaders };
       } catch (error) {
         return { status: 502, payload: { message: error instanceof Error ? error.message : 'The agent could not read Cluster Timeline.' }, headers: responseCorsHeaders };
@@ -634,6 +646,14 @@ export function createAgentLoopbackServer(options) {
             ...runtimeConfig,
             connectionId: introspection.connectionId
           }),
+          headers: responseCorsHeaders
+        };
+      }
+
+      if (url.pathname === '/v1/namespaces/summary') {
+        return {
+          status: 200,
+          payload: await namespaceSummaryProvider(runtimeConfig),
           headers: responseCorsHeaders
         };
       }
@@ -684,6 +704,34 @@ export function createAgentLoopbackServer(options) {
           }),
           headers: responseCorsHeaders
         };
+      }
+
+      if (url.pathname === '/v1/pods/inspect') {
+        return {
+          status: 200,
+          payload: await podInspectProvider(runtimeConfig, {
+            namespace: url.searchParams.get('ns') || '',
+            name: url.searchParams.get('name') || ''
+          }),
+          headers: responseCorsHeaders
+        };
+      }
+
+      if (url.pathname === '/v1/objects/inspect') {
+        try {
+          return {
+            status: 200,
+            payload: await objectInspectProvider(runtimeConfig, {
+              kind: url.searchParams.get('kind') || '',
+              namespace: url.searchParams.get('ns') || '',
+              name: url.searchParams.get('name') || ''
+            }),
+            headers: responseCorsHeaders
+          };
+        } catch (error) {
+          if (error instanceof TypeError) return { status: 400, payload: { error: error.message }, headers: responseCorsHeaders };
+          throw error;
+        }
       }
 
       if (url.pathname === '/v1/pods/related-resources') {
@@ -863,6 +911,14 @@ export function createAgentLoopbackServer(options) {
         };
       }
 
+      if (url.pathname === '/v1/components/details') {
+        return {
+          status: 200,
+          payload: await componentDetailsProvider(runtimeConfig),
+          headers: responseCorsHeaders
+        };
+      }
+
       if (url.pathname === '/v1/components') {
         return {
           status: 200,
@@ -890,7 +946,7 @@ export function createAgentLoopbackServer(options) {
       if (url.pathname === '/v1/domain-health') {
         return {
           status: 200,
-          payload: await domainHealthProvider(runtimeConfig, url.searchParams.get('ns')),
+          payload: await domainHealthProvider(runtimeConfig, url.searchParams.get('ns'), { resolveDns: true }),
           headers: responseCorsHeaders
         };
       }

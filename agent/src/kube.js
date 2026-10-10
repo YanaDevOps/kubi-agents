@@ -1,5 +1,6 @@
 import { KubeConfig } from '@kubernetes/client-node';
-import { createHash } from 'node:crypto';
+import { X509Certificate, createHash } from 'node:crypto';
+import dns from 'node:dns';
 import fs from 'node:fs';
 import http from 'node:http';
 import https from 'node:https';
@@ -17,6 +18,11 @@ import {
   buildUniversalBackupActivitySummary
 } from '../../src/shared/backup-activity.js';
 import { deriveRuntimeTargetKey } from '../../src/shared/runtime-target.js';
+import { buildObjectInspect, buildPodInspect, inspectObjectPaths } from '../../src/shared/pod-inspect.js';
+import { METADATA_ACCEPT, collectNamespaceSummary } from '../../src/shared/namespace-summary.js';
+import { buildMeshOverview } from '../../src/shared/mesh-overview.js';
+import { collectPvcMounts, persistentVolumeBackend } from '../../src/shared/pvc-mounts.js';
+import { collectComponentDetails } from '../../src/shared/component-details.js';
 import { classifySystemConfigMap } from '../../src/shared/system-configmap.js';
 import { buildConfigMapInventory, configMapContent } from '../../src/shared/configmap-inventory.js';
 import {
@@ -59,6 +65,7 @@ import {
   buildRbacExplorerSummary,
   buildPortsValidationItems,
   buildRbacValidationItems,
+  buildHygieneValidationItems,
   buildTopologyGraphSummary
 } from '../../src/cluster-runtime/relationship-runtime.js';
 
@@ -167,7 +174,7 @@ export async function fetchKubeJson(kubeConfig, pathWithQuery, options = {}) {
   const requestOptions = await kubeConfig.applyToFetchOptions({
     method: 'GET',
     headers: {
-      accept: 'application/json'
+      accept: options.accept || 'application/json'
     }
   });
 
@@ -470,6 +477,16 @@ function normalizeNode(record) {
     kubeletVersion: stringOrUndefined(nodeInfo?.kubeletVersion),
     osImage: stringOrUndefined(nodeInfo?.osImage),
     architecture: stringOrUndefined(nodeInfo?.architecture),
+    kernelVersion: stringOrUndefined(nodeInfo?.kernelVersion),
+    containerRuntimeVersion: stringOrUndefined(nodeInfo?.containerRuntimeVersion),
+    conditionDetails: statusConditions(record).map((condition) => ({
+      type: stringOrUndefined(condition.type) || 'Unknown',
+      status: stringOrUndefined(condition.status) || 'Unknown',
+      reason: stringOrUndefined(condition.reason),
+      message: stringOrUndefined(condition.message),
+      lastTransitionTime: stringOrUndefined(condition.lastTransitionTime)
+    })),
+    labels: asStringRecord(meta.labels),
     createdAt: meta.createdAt,
     taints: asRecordArray(spec?.taints).map((taint) => {
       const key = stringOrUndefined(taint.key) || 'taint';
@@ -1341,6 +1358,24 @@ export async function loadLocalNamespaces(runtimeConfig) {
   }
 }
 
+export async function loadLocalNamespaceSummary(runtimeConfig) {
+  const kubeConfig = loadLocalKubeConfig(runtimeConfig);
+  try {
+    return await collectNamespaceSummary({ request: (path, settings) => fetchKubeJson(kubeConfig, path, { ...settings, timeoutMs: 10_000 }) });
+  } catch (error) {
+    throw new Error(sanitizeKubeError(error));
+  }
+}
+
+export async function loadLocalComponentDetails(runtimeConfig) {
+  const kubeConfig = loadLocalKubeConfig(runtimeConfig);
+  try {
+    return await collectComponentDetails({ request: (path, settings) => fetchKubeJson(kubeConfig, path, { ...settings, timeoutMs: 10_000 }) });
+  } catch (error) {
+    throw new Error(sanitizeKubeError(error));
+  }
+}
+
 export async function loadLocalNodes(runtimeConfig) {
   try {
     const kubeConfig = loadLocalKubeConfig(runtimeConfig);
@@ -1762,6 +1797,27 @@ function splitLogLines(value) {
   return String(value || '').split(/\r?\n/).filter((line) => line.length > 0);
 }
 
+function jobOwner(ownerReferences) {
+  const list = Array.isArray(ownerReferences) ? ownerReferences : [];
+  const owner = list.find((entry) => entry && entry.controller === true) || list[0];
+  return owner && owner.kind && owner.name ? { kind: String(owner.kind), name: String(owner.name) } : undefined;
+}
+
+function jobConditions(status) {
+  return (Array.isArray(status?.conditions) ? status.conditions : []).map((condition) => ({
+    type: String(condition?.type || 'Unknown'),
+    status: String(condition?.status || 'Unknown'),
+    reason: typeof condition?.reason === 'string' ? condition.reason : undefined,
+    message: typeof condition?.message === 'string' ? condition.message.slice(0, 512) : undefined
+  }));
+}
+
+function podTermination(status) {
+  const statuses = Array.isArray(status?.containerStatuses) ? status.containerStatuses : [];
+  const terminated = statuses.map((entry) => entry?.state?.terminated || entry?.lastState?.terminated).find(Boolean);
+  return terminated ? { exitCode: typeof terminated.exitCode === 'number' ? terminated.exitCode : undefined, terminatedReason: typeof terminated.reason === 'string' ? terminated.reason : undefined } : {};
+}
+
 function buildJobPodRef(pod) {
   const meta = metadataFor(pod);
   const status = asRecord(pod.status);
@@ -1773,7 +1829,8 @@ function buildJobPodRef(pod) {
     node: stringOrUndefined(spec?.nodeName),
     startedAt: stringOrUndefined(status?.startTime),
     finishedAt: podFinishedAt(pod),
-    containers: podContainerNames(pod)
+    containers: podContainerNames(pod),
+    ...podTermination(status)
   };
 }
 
@@ -1807,6 +1864,8 @@ function buildRuntimeJob(job, pods) {
     backoffLimitPerIndex: numberOrUndefined(spec?.backoffLimitPerIndex),
     maxFailedIndexes: numberOrUndefined(spec?.maxFailedIndexes),
     ownerCronJob: ownerName(meta.ownerReferences, 'CronJob'),
+    owner: jobOwner(meta.ownerReferences),
+    conditions: jobConditions(status),
     labels: meta.labels,
     annotations: asStringRecord(asRecord(job.metadata)?.annotations),
     pods: pods.filter((pod) => podBelongsToJob(pod, job)).map(buildJobPodRef)
@@ -1822,7 +1881,7 @@ function buildRuntimeCronJob(cronJob, jobs) {
   const recentJobs = jobs
     .filter((job) => job.ownerCronJob === meta.name && job.namespace === meta.namespace)
     .sort((left, right) => Date.parse(right.createdAt || '') - Date.parse(left.createdAt || ''))
-    .slice(0, 5)
+    .slice(0, 10)
     .map((job) => ({
       name: job.name,
       status: job.status,
@@ -1845,6 +1904,7 @@ function buildRuntimeCronJob(cronJob, jobs) {
     schedule: stringOrUndefined(spec?.schedule) || '-',
     suspend,
     concurrencyPolicy: stringOrUndefined(spec?.concurrencyPolicy),
+    timeZone: stringOrUndefined(spec?.timeZone),
     createdAt: meta.createdAt,
     lastScheduleTime: stringOrUndefined(status?.lastScheduleTime),
     lastSuccessfulTime: stringOrUndefined(status?.lastSuccessfulTime),
@@ -1963,6 +2023,26 @@ export async function loadLocalPodDns(runtimeConfig, input) {
   } catch (error) {
     throw new Error(sanitizeKubeError(error));
   }
+}
+
+export async function loadLocalPodInspect(runtimeConfig, input) {
+  const kubeConfig = loadLocalKubeConfig(runtimeConfig);
+  const namespace = input?.namespace || runtimeConfig.namespace || 'default';
+  const name = input?.name;
+  if (!name) throw new Error('Pod name is required.');
+  const encodedNamespace = encodeURIComponent(namespace);
+  const pod = await fetchKubeJson(kubeConfig, `/api/v1/namespaces/${encodedNamespace}/pods/${encodeURIComponent(name)}`);
+  const selector = encodeURIComponent(`involvedObject.kind=Pod,involvedObject.name=${name}`);
+  const events = await fetchKubeList(kubeConfig, `/api/v1/namespaces/${encodedNamespace}/events?fieldSelector=${selector}`, true).catch(() => ({ items: [] }));
+  return buildPodInspect({ pod, events: events.items || [] });
+}
+
+export async function loadLocalObjectInspect(runtimeConfig, input) {
+  const kubeConfig = loadLocalKubeConfig(runtimeConfig);
+  const paths = inspectObjectPaths({ kind: input?.kind, namespace: input?.namespace, name: input?.name });
+  const object = await fetchKubeJson(kubeConfig, paths.object);
+  const events = await fetchKubeList(kubeConfig, paths.events, true).catch(() => ({ items: [] }));
+  return buildObjectInspect({ kind: input.kind, object, events: events.items || [] });
 }
 
 export async function loadLocalPodRelatedResources(runtimeConfig, input) {
@@ -2239,6 +2319,18 @@ function secretReferenceCounts(referencedBy) {
   );
 }
 
+/** Expiry and SANs of the public certificate in a TLS Secret; private key material is never touched or returned. */
+function tlsCertificateSummary(type, data) {
+  if (type !== 'kubernetes.io/tls' || typeof data['tls.crt'] !== 'string') return {};
+  try {
+    const certificate = new X509Certificate(Buffer.from(data['tls.crt'], 'base64'));
+    const sans = String(certificate.subjectAltName || '').split(',').map((entry) => entry.trim().replace(/^DNS:/, '')).filter(Boolean).slice(0, 20);
+    return { certNotAfter: new Date(certificate.validTo).toISOString(), certSans: sans, certIssuer: String(certificate.issuer || '').split('\n').find((line) => line.startsWith('O=') || line.startsWith('CN='))?.replace(/^(O|CN)=/, '') };
+  } catch {
+    return {};
+  }
+}
+
 function estimateSecretBytes(data) {
   return Object.values(data).reduce((total, value) => total + Math.floor((String(value).length * 3) / 4), 0);
 }
@@ -2273,6 +2365,9 @@ function normalizeRuntimeSecret(record, refs) {
     dataKeys,
     dataKeyCount: dataKeys.length,
     totalBytes: estimateSecretBytes(data),
+    // Sizes only; values never leave the agent.
+    dataKeySizes: Object.fromEntries(dataKeys.map((key) => [key, estimateSecretBytes({ [key]: data[key] })])),
+    ...tlsCertificateSummary(type, data),
     dataRedacted: false,
     immutable: record.immutable === true,
     labelsCount: Object.keys(meta.labels).length,
@@ -2889,9 +2984,15 @@ export async function loadLocalServiceMesh(runtimeConfig, namespaceScope = null)
       meshResource('networking.istio.io', ['v1', 'v1beta1', 'v1alpha3'], 'serviceentries'),
       meshResource('networking.istio.io', ['v1', 'v1beta1', 'v1alpha3'], 'workloadentries'),
       meshResource('security.istio.io', ['v1', 'v1beta1', 'v1alpha1'], 'peerauthentications'),
-      meshResource('security.istio.io', ['v1', 'v1beta1', 'v1alpha1'], 'authorizationpolicies')
+      meshResource('security.istio.io', ['v1', 'v1beta1', 'v1alpha1'], 'authorizationpolicies'),
+      meshResource('security.istio.io', ['v1', 'v1beta1', 'v1alpha1'], 'requestauthentications'),
+      fetchKubeList(kubeConfig, '/apis/apps/v1/deployments?labelSelector=' + encodeURIComponent('app in (istiod,istio-ingressgateway,istio-egressgateway)'), true),
+      fetchKubeList(kubeConfig, '/apis/apps/v1/daemonsets', true),
+      fetchKubeList(kubeConfig, '/api/v1/services?labelSelector=' + encodeURIComponent('app in (istio-ingressgateway)'), true),
+      fetchKubeJson(kubeConfig, '/api/v1/namespaces/istio-system/configmaps/istio').then((item) => ({ items: [item] }))
     ]);
     if (requests.every((entry) => entry.status === 'rejected')) throw requests[0].reason;
+    const optionalItems = (index) => (requests[index].status === 'fulfilled' ? requests[index].value.items || [] : []);
     const issues = [];
     const namespaces = settledSection(requests[0], 'service-mesh', 'Namespaces could not be loaded for service mesh detection.', 'The Namespace list was truncated for service mesh detection.', issues);
     const pods = settledSection(requests[1], 'service-mesh', 'Pods could not be loaded for service mesh detection.', 'The Pod list was truncated for service mesh detection.', issues);
@@ -2906,7 +3007,13 @@ export async function loadLocalServiceMesh(runtimeConfig, namespaceScope = null)
     const peerAuthentications = settledSection(requests[10], 'service-mesh', 'PeerAuthentications could not be loaded for service mesh inspection.', 'The PeerAuthentication list was truncated for this runtime read.', issues);
     const authorizationPolicies = settledSection(requests[11], 'service-mesh', 'AuthorizationPolicies could not be loaded for service mesh inspection.', 'The AuthorizationPolicy list was truncated for this runtime read.', issues);
     const deepPartial = virtualServices.partial || destinationRules.partial || gateways.partial || serviceEntries.partial || workloadEntries.partial || peerAuthentications.partial || authorizationPolicies.partial;
-    return buildRuntimeServiceMeshInventory(namespaces.items, pods.items, deployments.items, services.items, crds.items, new Date().toISOString(), effectiveNamespace, issues, namespaces.partial || pods.partial || deployments.partial || services.partial || crds.partial || deepPartial, {
+    const overview = buildMeshOverview({
+      namespaces: namespaces.items, pods: pods.items, deployments: [...deployments.items, ...optionalItems(13)], daemonSets: optionalItems(14),
+      services: [...services.items, ...optionalItems(15)], virtualServices: virtualServices.items, destinationRules: destinationRules.items, gateways: gateways.items,
+      serviceEntries: serviceEntries.items, peerAuthentications: peerAuthentications.items, authorizationPolicies: authorizationPolicies.items,
+      requestAuthentications: optionalItems(12), configMaps: optionalItems(16)
+    });
+    const inventory = buildRuntimeServiceMeshInventory(namespaces.items, pods.items, deployments.items, services.items, crds.items, new Date().toISOString(), effectiveNamespace, issues, namespaces.partial || pods.partial || deployments.partial || services.partial || crds.partial || deepPartial, {
       virtualServices: virtualServices.items,
       destinationRules: destinationRules.items,
       gateways: gateways.items,
@@ -2916,6 +3023,7 @@ export async function loadLocalServiceMesh(runtimeConfig, namespaceScope = null)
       authorizationPolicies: authorizationPolicies.items,
       partial: deepPartial
     });
+    return overview ? { ...inventory, overview } : inventory;
   } catch (error) {
     throw new Error(sanitizeKubeError(error));
   }
@@ -3006,14 +3114,14 @@ export function buildRuntimeGhostResources(services, endpointSlices, ingresses, 
     if (Object.keys(selector).length === 0) continue;
     const endpointStatus = runtimeServiceEndpointStatus(service, endpointSliceRecords);
     if (endpointStatus.readyAddresses === 0) {
-      pushRuntimeGhostIssue(ghostIssues, { category: 'services-without-endpoints', severity: 'warning', resourceKind: 'Service', resourceName: meta.name, namespace: meta.namespace, reason: `Service selector exists but no ready EndpointSlice addresses were found (${endpointStatus.slices} slices, ${endpointStatus.addresses} addresses).`, related: [{ kind: 'Service', name: meta.name, namespace: meta.namespace }], suggestedActions: ['Check the service selector labels.', 'Verify matching pods are running and ready.'] });
+      pushRuntimeGhostIssue(ghostIssues, { category: 'services-without-endpoints', severity: 'warning', resourceKind: 'Service', resourceName: meta.name, namespace: meta.namespace, createdAt: meta.createdAt, reason: `Service selector exists but no ready EndpointSlice addresses were found (${endpointStatus.slices} slices, ${endpointStatus.addresses} addresses).`, related: [{ kind: 'Service', name: meta.name, namespace: meta.namespace }], suggestedActions: ['Check the service selector labels.', 'Verify matching pods are running and ready.'] });
     }
   }
   for (const ingress of asRecordArray(ingresses)) {
     const meta = metadataFor(ingress);
     for (const serviceName of runtimeBackendServiceNames(ingress)) {
       if (!serviceKeys.has(referenceKey(meta.namespace, serviceName))) {
-        pushRuntimeGhostIssue(ghostIssues, { category: 'broken-ingress-backends', severity: 'critical', resourceKind: 'Ingress', resourceName: meta.name, namespace: meta.namespace, reason: `Ingress references backend service ${serviceName}, but that service was not found in the same namespace.`, related: [{ kind: 'Service', name: serviceName, namespace: meta.namespace }], suggestedActions: ['Create the backend Service or update the Ingress backend reference.'] });
+        pushRuntimeGhostIssue(ghostIssues, { category: 'broken-ingress-backends', severity: 'critical', resourceKind: 'Ingress', resourceName: meta.name, namespace: meta.namespace, createdAt: meta.createdAt, reason: `Ingress references backend service ${serviceName}, but that service was not found in the same namespace.`, related: [{ kind: 'Service', name: serviceName, namespace: meta.namespace }], suggestedActions: ['Create the backend Service or update the Ingress backend reference.'] });
       }
     }
   }
@@ -3021,40 +3129,40 @@ export function buildRuntimeGhostResources(services, endpointSlices, ingresses, 
     const meta = metadataFor(pvc);
     const status = stringOrUndefined(asRecord(pvc.status)?.phase) || 'Unknown';
     if (status === 'Bound' && !podRefs.pvcs.has(referenceKey(meta.namespace, meta.name))) {
-      pushRuntimeGhostIssue(ghostIssues, { category: 'unused-pvc', severity: 'warning', resourceKind: 'PersistentVolumeClaim', resourceName: meta.name, namespace: meta.namespace, reason: 'Bound PVC is not mounted by any runtime-visible pod.', related: [{ kind: 'PersistentVolumeClaim', name: meta.name, namespace: meta.namespace }], suggestedActions: ['Confirm the claim is still needed before deleting it.'] });
+      pushRuntimeGhostIssue(ghostIssues, { category: 'unused-pvc', severity: 'warning', resourceKind: 'PersistentVolumeClaim', resourceName: meta.name, namespace: meta.namespace, createdAt: meta.createdAt, reason: 'Bound PVC is not mounted by any runtime-visible pod.', related: [{ kind: 'PersistentVolumeClaim', name: meta.name, namespace: meta.namespace }], suggestedActions: ['Confirm the claim is still needed before deleting it.'] });
     }
   }
   for (const configMap of configMapUsageComplete ? asRecordArray(configMaps) : []) {
     const meta = metadataFor(configMap);
     if (!referencedResources.has(`configmap:${referenceKey(meta.namespace, meta.name)}`)) {
-      pushRuntimeGhostIssue(ghostIssues, { category: 'unused-configmaps', severity: 'info', resourceKind: 'ConfigMap', resourceName: meta.name, namespace: meta.namespace, reason: 'No reference was found in workloads, controllers, RBAC, TLS configuration, or exact container arguments.', ...classifySystemConfigMap(configMap), related: [{ kind: 'ConfigMap', name: meta.name, namespace: meta.namespace }], suggestedActions: ['Check application configuration history before cleanup.'] });
+      pushRuntimeGhostIssue(ghostIssues, { category: 'unused-configmaps', severity: 'info', resourceKind: 'ConfigMap', resourceName: meta.name, namespace: meta.namespace, createdAt: meta.createdAt, reason: 'No reference was found in workloads, controllers, RBAC, TLS configuration, or exact container arguments.', ...classifySystemConfigMap(configMap), related: [{ kind: 'ConfigMap', name: meta.name, namespace: meta.namespace }], suggestedActions: ['Check application configuration history before cleanup.'] });
     }
   }
   for (const secret of secretUsageComplete ? asRecordArray(secrets) : []) {
     const meta = metadataFor(secret);
     const type = stringOrUndefined(secret.type) || 'Opaque';
     if (!isRuntimeSystemNamespace(meta.namespace) && type !== 'kubernetes.io/service-account-token' && !meta.name.startsWith('sh.helm.release.v1.') && !referencedResources.has(`secret:${referenceKey(meta.namespace, meta.name)}`)) {
-      pushRuntimeGhostIssue(ghostIssues, { category: 'unused-secrets', severity: 'info', resourceKind: 'Secret', resourceName: meta.name, namespace: meta.namespace, reason: 'No reference was found in workloads, controllers, RBAC, TLS configuration, or exact container arguments.', related: [{ kind: 'Secret', name: meta.name, namespace: meta.namespace }], suggestedActions: ['Verify no external controller consumes this Secret before cleanup.'] });
+      pushRuntimeGhostIssue(ghostIssues, { category: 'unused-secrets', severity: 'info', resourceKind: 'Secret', resourceName: meta.name, namespace: meta.namespace, createdAt: meta.createdAt, reason: 'No reference was found in workloads, controllers, RBAC, TLS configuration, or exact container arguments.', related: [{ kind: 'Secret', name: meta.name, namespace: meta.namespace }], suggestedActions: ['Verify no external controller consumes this Secret before cleanup.'] });
     }
   }
   for (const serviceAccount of serviceAccountUsageComplete ? asRecordArray(serviceAccounts) : []) {
     const meta = metadataFor(serviceAccount);
     if (!isRuntimeSystemNamespace(meta.namespace) && meta.name !== 'default' && !referencedResources.has(`serviceaccount:${referenceKey(meta.namespace, meta.name)}`)) {
-      pushRuntimeGhostIssue(ghostIssues, { category: 'unused-serviceaccounts', severity: 'info', resourceKind: 'ServiceAccount', resourceName: meta.name, namespace: meta.namespace, reason: 'No reference was found in Pods, workload templates, RBAC bindings, Vault authentication, or controller lifecycle resources.', related: [{ kind: 'ServiceAccount', name: meta.name, namespace: meta.namespace }], suggestedActions: ['Check external TokenRequest consumers before removing the ServiceAccount.'] });
+      pushRuntimeGhostIssue(ghostIssues, { category: 'unused-serviceaccounts', severity: 'info', resourceKind: 'ServiceAccount', resourceName: meta.name, namespace: meta.namespace, createdAt: meta.createdAt, reason: 'No reference was found in Pods, workload templates, RBAC bindings, Vault authentication, or controller lifecycle resources.', related: [{ kind: 'ServiceAccount', name: meta.name, namespace: meta.namespace }], suggestedActions: ['Check external TokenRequest consumers before removing the ServiceAccount.'] });
     }
   }
   for (const replicaSet of asRecordArray(replicaSets)) {
     const meta = metadataFor(replicaSet);
     const owners = asRecordArray(asRecord(replicaSet.metadata)?.ownerReferences);
     if (!owners.some((owner) => owner.kind === 'Deployment')) {
-      pushRuntimeGhostIssue(ghostIssues, { category: 'orphan-replicasets', severity: 'info', resourceKind: 'ReplicaSet', resourceName: meta.name, namespace: meta.namespace, reason: 'ReplicaSet does not have a Deployment owner reference.', related: [{ kind: 'ReplicaSet', name: meta.name, namespace: meta.namespace }], suggestedActions: ['Confirm this ReplicaSet is expected before cleanup.'] });
+      pushRuntimeGhostIssue(ghostIssues, { category: 'orphan-replicasets', severity: 'info', resourceKind: 'ReplicaSet', resourceName: meta.name, namespace: meta.namespace, createdAt: meta.createdAt, reason: 'ReplicaSet does not have a Deployment owner reference.', related: [{ kind: 'ReplicaSet', name: meta.name, namespace: meta.namespace }], suggestedActions: ['Confirm this ReplicaSet is expected before cleanup.'] });
     }
   }
   for (const endpointSlice of endpointSliceRecords) {
     const meta = metadataFor(endpointSlice);
     const serviceName = asStringRecord(asRecord(endpointSlice.metadata)?.labels)['kubernetes.io/service-name'];
     if (serviceName && !serviceKeys.has(referenceKey(meta.namespace, serviceName))) {
-      pushRuntimeGhostIssue(ghostIssues, { category: 'orphan-endpointslices', severity: 'info', resourceKind: 'EndpointSlice', resourceName: meta.name, namespace: meta.namespace, reason: `EndpointSlice points to service ${serviceName}, but that Service was not found.`, related: [{ kind: 'Service', name: serviceName, namespace: meta.namespace }], suggestedActions: ['Check whether the owning Service was deleted or recreated.'] });
+      pushRuntimeGhostIssue(ghostIssues, { category: 'orphan-endpointslices', severity: 'info', resourceKind: 'EndpointSlice', resourceName: meta.name, namespace: meta.namespace, createdAt: meta.createdAt, reason: `EndpointSlice points to service ${serviceName}, but that Service was not found.`, related: [{ kind: 'Service', name: serviceName, namespace: meta.namespace }], suggestedActions: ['Check whether the owning Service was deleted or recreated.'] });
     }
   }
   return {
@@ -3183,7 +3291,9 @@ function buildRuntimeImageRisk(pods, fetchedAt, namespaceScope, issues = [], par
       const versions = versionsByRepository.get(parsed.repository) || new Set();
       versions.add(parsed.versionKey);
       versionsByRepository.set(parsed.repository, versions);
-      const usage = { namespace: normalizedPod.namespace, pod: normalizedPod.name, container: container.name, containerType: container.type, pullPolicy: container.imagePullPolicy };
+      const statusEntry = [...asRecordArray(asRecord(pod.status)?.containerStatuses), ...asRecordArray(asRecord(pod.status)?.initContainerStatuses)].find((entry) => entry.name === container.name);
+      const usage = { namespace: normalizedPod.namespace, pod: normalizedPod.name, container: container.name, containerType: container.type, pullPolicy: container.imagePullPolicy,
+        imageID: stringOrUndefined(statusEntry?.imageID), ownerKind: normalizedPod.ownerKind, ownerName: normalizedPod.ownerName, phase: normalizedPod.phase };
       const existing = groups.get(container.image);
       if (existing) {
         existing.usages.push(usage);
@@ -3613,6 +3723,7 @@ function normalizePersistentVolume(record) {
     reclaimPolicy: stringOrUndefined(spec?.persistentVolumeReclaimPolicy),
     volumeMode: stringOrUndefined(spec?.volumeMode),
     createdAt: meta.createdAt,
+    ...(persistentVolumeBackend(record) ? { backend: persistentVolumeBackend(record) } : {}),
     ...(claimRef
       ? {
           claimRef: {
@@ -4300,8 +4411,10 @@ export async function loadLocalStorage(runtimeConfig, namespaceScope = null, opt
     const usageObservedAt = new Date().toISOString();
     let validUsageCount = 0;
     let discardedSamples = 0;
-    persistentVolumeClaims.items = persistentVolumeClaims.items.map((claim) => {
-      const key = `${claim.namespace}/${claim.name}`;
+    const pvcMounts = collectPvcMounts(asRecordArray(podItems));
+    persistentVolumeClaims.items = persistentVolumeClaims.items.map((rawClaim) => {
+      const key = `${rawClaim.namespace}/${rawClaim.name}`;
+      const claim = { ...rawClaim, mounts: pvcMounts.get(key) || [] };
       const sample = pvcUsage.usage.get(key);
       const mounted = [...(pvcUsage.mountedByPods.get(key) || [])].sort();
       if (!isReliablePVCUsageSample(sample, parseBytes(claim.capacity || claim.requested))) {
@@ -6262,7 +6375,24 @@ function normalizeLocalChallenges(records) {
   });
 }
 
-export async function loadLocalDomainHealth(runtimeConfig, namespaceScope = null) {
+/** Resolves public hosts from the customer host so Domain Health can show where DNS points. */
+async function resolveDomainHosts(hosts, timeoutMs = 2_000) {
+  const names = [...new Set(hosts.map((host) => host.host).filter((name) => name && !name.includes('*')))].slice(0, 50);
+  const entries = await Promise.all(names.map(async (name) => {
+    try {
+      const result = await Promise.race([
+        dns.promises.lookup(name, { all: true }),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), timeoutMs))
+      ]);
+      return [name, { addresses: result.map((entry) => entry.address) }];
+    } catch (error) {
+      return [name, { addresses: [], error: error?.code === 'ENOTFOUND' ? 'NXDOMAIN' : error?.message === 'timeout' ? 'timeout' : 'lookup failed' }];
+    }
+  }));
+  return Object.fromEntries(entries);
+}
+
+export async function loadLocalDomainHealth(runtimeConfig, namespaceScope = null, options = {}) {
   try {
     const kubeConfig = loadLocalKubeConfig(runtimeConfig);
     const effectiveNamespace = namespaceScope || runtimeConfig.namespace || null;
@@ -6458,7 +6588,8 @@ export async function loadLocalDomainHealth(runtimeConfig, namespaceScope = null
       certManagerMessage: certManagerDenied ? 'cert-manager is installed, but its resources are not readable with the current credentials.' : undefined,
       certificates: buildResourceList(certificates, fetchedAt, requests[2].status === 'fulfilled' ? requests[2].value.truncated : certManagerDenied),
       orders: buildResourceList(orders, fetchedAt, requests[3].status === 'fulfilled' ? requests[3].value.truncated : certManagerDenied),
-      challenges: buildResourceList(challenges, fetchedAt, requests[4].status === 'fulfilled' ? requests[4].value.truncated : certManagerDenied)
+      challenges: buildResourceList(challenges, fetchedAt, requests[4].status === 'fulfilled' ? requests[4].value.truncated : certManagerDenied),
+      ...(options.resolveDns ? { dnsResolution: await resolveDomainHosts(hosts) } : {})
     };
   } catch (error) {
     throw new Error(sanitizeKubeError(error));
@@ -6477,7 +6608,10 @@ export async function loadLocalValidation(runtimeConfig, namespaceScope = null) 
       loadLocalDomainHealth(runtimeConfig, effectiveNamespace),
       loadLocalRbac(runtimeConfig, effectiveNamespace),
       loadLocalPorts(runtimeConfig, effectiveNamespace),
-      loadLocalGatewayApiValidationData(runtimeConfig, effectiveNamespace)
+      loadLocalGatewayApiValidationData(runtimeConfig, effectiveNamespace),
+      fetchKubeList(loadLocalKubeConfig(runtimeConfig), namespacePath('/api/v1/pods', '/api/v1/namespaces/:namespace/pods', effectiveNamespace)),
+      // Metadata only: Secret values never reach the agent for this check.
+      fetchKubeList(loadLocalKubeConfig(runtimeConfig), namespacePath('/api/v1/secrets', '/api/v1/namespaces/:namespace/secrets', effectiveNamespace), false, { accept: METADATA_ACCEPT })
     ]);
 
     if (requests.every((entry) => entry.status === 'rejected')) {
@@ -6681,6 +6815,12 @@ export async function loadLocalValidation(runtimeConfig, namespaceScope = null) 
       }
     }
 
+    items.push(...buildHygieneValidationItems({
+      pods: requests[9].status === 'fulfilled' ? requests[9].value.items : [],
+      secrets: requests[10].status === 'fulfilled' ? requests[10].value.items : null,
+      nodes: nodes?.items || [],
+      certificates: domainHealth?.certificates?.items || []
+    }));
     items.push(...(rbac ? buildRbacValidationItems(rbac) : []));
     items.push(...(ports ? buildPortsValidationItems(ports) : []));
     items.push(...(gatewayApi
@@ -6726,7 +6866,9 @@ export async function loadLocalValidation(runtimeConfig, namespaceScope = null) 
           workloads: deduped.filter((item) => item.category === 'workloads').length,
           networking: deduped.filter((item) => item.category === 'networking').length,
           storage: deduped.filter((item) => item.category === 'storage').length,
-          rbac: deduped.filter((item) => item.category === 'rbac').length
+          rbac: deduped.filter((item) => item.category === 'rbac').length,
+          pods: deduped.filter((item) => item.category === 'pods').length,
+          secrets: deduped.filter((item) => item.category === 'secrets').length
         }
       }
     };

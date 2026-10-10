@@ -497,6 +497,7 @@ export function createTimelineManager({
       }
     },
     async list(target, query) { return (await store.get()).list(targetKey(target), query); },
+    async stats(target, query) { return (await store.get()).stats(targetKey(target), query); },
     async detail(target, id) { return (await store.get()).detail(targetKey(target), id); },
     async status(target) {
       const key = targetKey(target);
@@ -518,6 +519,6 @@ export function createTimelineManager({
       if (storePromise) await storePromise.then((value) => value.close());
     }
   };
-  manager.store = { getState: (...args) => store.get().then((value) => value.getState(...args)), saveState: (...args) => store.get().then((value) => value.saveState(...args)), append: (...args) => store.get().then((value) => value.append(...args)), list: (...args) => store.get().then((value) => value.list(...args)), detail: (...args) => store.get().then((value) => value.detail(...args)), status: (...args) => store.get().then((value) => value.status(...args)), prune: (...args) => store.get().then((value) => value.prune(...args)) };
+  manager.store = { getState: (...args) => store.get().then((value) => value.getState(...args)), saveState: (...args) => store.get().then((value) => value.saveState(...args)), append: (...args) => store.get().then((value) => value.append(...args)), list: (...args) => store.get().then((value) => value.list(...args)), stats: (...args) => store.get().then((value) => value.stats(...args)), detail: (...args) => store.get().then((value) => value.detail(...args)), status: (...args) => store.get().then((value) => value.status(...args)), prune: (...args) => store.get().then((value) => value.prune(...args)) };
   return manager;
 }
