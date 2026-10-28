@@ -223,6 +223,13 @@ so the Cluster workload charts are full when the page opens. It reads
 metrics.k8s.io every 10 seconds only while the history was requested in the last
 30 minutes and stores nothing on disk. Upgrade in place; no re-pairing is needed.
 
+Agent `v0.1.61` reads the Kubernetes API through Bun's `fetch` with the
+kubeconfig CA and client certificate, and enforces its own request deadline,
+abort, and byte limit. Bun's `node:https` occasionally stalled in the middle of a
+large list and kept the abandoned request in memory, so Timeline collection grew
+the agent by hundreds of MB per day. Custom agents such as proxies keep
+`node:https` with the same deadline. Upgrade in place; no re-pairing is needed.
+
 ConfigMap inventory groups env, volume, argument, and controller reference paths
 by unique Pod, workload template, or recognized controller. The API reports the
 consumer count separately from the underlying reference-path count so repeated

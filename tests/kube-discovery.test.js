@@ -31,10 +31,11 @@ current-context: shared-context
 `;
 
 describe('kubeconfig source merge', () => {
-  test('uses kubeconfig-aware Node transport instead of global fetch', async () => {
+  test('trusts only the kubeconfig CA on the Kubernetes transport', async () => {
     const certificate = fs.readFileSync(fileURLToPath(new URL('./fixtures/tls/localhost-cert.pem', import.meta.url)), 'utf8');
     const privateKey = fs.readFileSync(fileURLToPath(new URL('./fixtures/tls/localhost-key.pem', import.meta.url)), 'utf8');
-    const agent = new https.Agent({ ca: certificate });
+    const trusted = new https.Agent({ ca: certificate });
+    const untrusted = new https.Agent();
     const server = https.createServer({ cert: certificate, key: privateKey }, (_request, response) => {
       response.writeHead(200, { 'content-type': 'application/json' });
       response.end(JSON.stringify({ gitVersion: 'v1.test' }));
@@ -42,19 +43,18 @@ describe('kubeconfig source merge', () => {
     await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
     const address = server.address();
     if (!address || typeof address === 'string') throw new Error('Test server did not start.');
-    const previousFetch = globalThis.fetch;
-    globalThis.fetch = () => {
-      throw new Error('global fetch must not handle agent Kubernetes requests');
-    };
+    const kubeConfig = (agent) => ({
+      getCurrentCluster: () => ({ server: `https://127.0.0.1:${address.port}` }),
+      applyToFetchOptions: async (options) => ({ ...options, agent })
+    });
 
     try {
-      expect(await fetchKubeJson({
-        getCurrentCluster: () => ({ server: `https://127.0.0.1:${address.port}` }),
-        applyToFetchOptions: async (options) => ({ ...options, agent })
-      }, '/version')).toEqual({ gitVersion: 'v1.test' });
+      expect(await fetchKubeJson(kubeConfig(trusted), '/version')).toEqual({ gitVersion: 'v1.test' });
+      // The CA comes from the kubeconfig agent, not from a global trust store.
+      await expect(fetchKubeJson(kubeConfig(untrusted), '/version')).rejects.toThrow();
     } finally {
-      agent.destroy();
-      globalThis.fetch = previousFetch;
+      trusted.destroy();
+      untrusted.destroy();
       await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     }
   });

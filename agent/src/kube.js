@@ -99,6 +99,72 @@ function nodeHeaders(headers) {
   return headers;
 }
 
+// Under Bun, node:https occasionally stalls in the middle of a large response body
+// (seen on the ~6 MB CRD list), and a request abandoned mid-body keeps its Response and
+// every received chunk reachable from a native root forever. Bun's own fetch has
+// neither problem, so the compiled agent uses it whenever the kubeconfig agent is a
+// plain https.Agent whose TLS settings fetch can express. Everything else (Node,
+// proxies, PFX, custom server names or ciphers) keeps the node:https transport.
+const FETCH_TLS_UNSUPPORTED = ['pfx', 'servername', 'ciphers', 'honorCipherOrder', 'ecdhCurve', 'clientCertEngine',
+  'crl', 'dhparam', 'secureOptions', 'secureProtocol', 'sessionIdContext'];
+
+function bunFetchTls(url, agent) {
+  if (!process.versions.bun || typeof fetch !== 'function') return null;
+  if (url.protocol === 'http:') return agent && agent.constructor !== http.Agent ? null : {};
+  if (url.protocol !== 'https:' || !agent || agent.constructor !== https.Agent) return null;
+  const options = agent.options || {};
+  if (FETCH_TLS_UNSUPPORTED.some((key) => options[key] !== undefined && options[key] !== null)) return null;
+  const tls = {};
+  for (const key of ['ca', 'cert', 'key', 'passphrase', 'rejectUnauthorized']) {
+    if (options[key] !== undefined) tls[key] = options[key];
+  }
+  return tls;
+}
+
+async function requestKubeApiWithFetch(url, requestOptions, tls) {
+  const { maxBytes, signal } = requestOptions;
+  const controller = new AbortController();
+  const deadline = setTimeout(
+    () => controller.abort(new Error('Kubernetes API request timed out.')),
+    Number(requestOptions.timeout) || 10000
+  );
+  const onAbort = () => controller.abort(signal.reason || new Error('Kubernetes API request was cancelled.'));
+  signal?.addEventListener('abort', onAbort, { once: true });
+  if (signal?.aborted) onAbort();
+  let reading = false;
+  try {
+    const response = await fetch(url, {
+      method: requestOptions.method || 'GET',
+      headers: requestOptions.headers,
+      redirect: 'manual',
+      signal: controller.signal,
+      ...(url.protocol === 'https:' ? { tls } : {})
+    });
+    const chunks = [];
+    let bytes = 0;
+    const reader = response.body?.getReader();
+    reading = true;
+    while (reader) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (maxBytes !== undefined && value.length > maxBytes - bytes) {
+        await reader.cancel().catch(() => undefined);
+        throw Object.assign(new Error('Kubernetes API response exceeded the byte limit.'), { kubiLimit: true });
+      }
+      bytes += value.length;
+      chunks.push(value);
+    }
+    return { status: response.status, body: Buffer.concat(chunks).toString('utf8') };
+  } catch (error) {
+    if (controller.signal.aborted) throw controller.signal.reason;
+    if (reading && !error?.kubiLimit) throw new Error('Kubernetes API response was truncated.');
+    throw error;
+  } finally {
+    clearTimeout(deadline);
+    signal?.removeEventListener('abort', onAbort);
+  }
+}
+
 function requestKubeApi(url, requestOptions) {
   const transport = url.protocol === 'https:' ? https : url.protocol === 'http:' ? http : null;
   if (!transport) {
@@ -109,6 +175,8 @@ function requestKubeApi(url, requestOptions) {
     throw new TypeError('Kubernetes response byte limit must be a non-negative safe integer.');
   }
   requestOptions.signal?.throwIfAborted();
+  const fetchTls = bunFetchTls(url, httpOptions.agent);
+  if (fetchTls) return requestKubeApiWithFetch(url, requestOptions, fetchTls);
 
   return new Promise((resolve, reject) => {
     const chunks = [];
@@ -116,7 +184,17 @@ function requestKubeApi(url, requestOptions) {
     let settled = false;
     let incoming;
     const onAbort = () => fail(requestOptions.signal.reason || new Error('Kubernetes API request was cancelled.'));
-    const cleanup = () => requestOptions.signal?.removeEventListener('abort', onAbort);
+    // Bun's ClientRequest does not emit 'timeout' for a stalled request, so the promise
+    // would never settle and would retain the request and its buffered body. Enforce
+    // the limit for the whole request with our own timer.
+    const deadline = setTimeout(
+      () => fail(new Error('Kubernetes API request timed out.')),
+      Number(requestOptions.timeout) || 10000
+    );
+    const cleanup = () => {
+      clearTimeout(deadline);
+      requestOptions.signal?.removeEventListener('abort', onAbort);
+    };
     const fail = (error) => {
       if (settled) return;
       settled = true;
@@ -159,8 +237,6 @@ function requestKubeApi(url, requestOptions) {
         resolve({ status: response.statusCode ?? 0, body });
       });
     });
-    request.setTimeout(Number(requestOptions.timeout) || 10000);
-    request.on('timeout', () => request.destroy(new Error('Kubernetes API request timed out.')));
     request.on('error', fail);
     requestOptions.signal?.addEventListener('abort', onAbort, { once: true });
     if (requestOptions.signal?.aborted) onAbort();
